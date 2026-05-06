@@ -8,8 +8,7 @@ import Logbook from './pages/Logbook';
 import Drones from './pages/Drones';
 import Auth from './pages/Auth'; 
 import Team from './pages/Team';
-
-const Dashboard = () => <div>Flight Statistics</div>;
+import Dashboard from './pages/Dashboard';
 
 function App() {
   const [session, setSession] = useState(null);
@@ -38,14 +37,13 @@ function App() {
   const fetchProfile = async (userId) => {
     const { data, error } = await supabase
       .from('profiles')
-      .select('id, company_id, role, email') // ОНОВЛЕНО: Тепер беремо всі потрібні дані
+      .select('id, company_id, role, email') 
       .eq('id', userId)
       .single();
     
     if (data) {
       setProfile(data);
     } else {
-      // Захист: якщо профілю раптом немає в базі, створюємо локальну заглушку для Onboarding
       setProfile({ id: userId, company_id: null });
     }
     setLoading(false);
@@ -55,7 +53,6 @@ function App() {
     return <div style={{ height: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#64748b' }}>Loading workspace...</div>;
   }
 
-  // ОНОВЛЕНО: Якщо немає сесії АБО немає компанії -> гарантовано показуємо Auth/Onboarding
   if (!session || !profile?.company_id) {
     return <Auth session={session} />;
   }
@@ -64,11 +61,11 @@ function App() {
     <Router>
       <Routes>
         <Route path="/" element={<Layout />}>
-          <Route index element={<Dashboard />} />
+          {/* ВИПРАВЛЕНО: Додано profile={profile} */}
+          <Route index element={<Dashboard profile={profile} />} />
           <Route path="missions" element={<Missions profile={profile} />} />
           <Route path="logbook" element={<Logbook profile={profile} />} />
           <Route path="drones" element={<Drones profile={profile} />} />
-          {/* ВИПРАВЛЕНО: Team тепер знаходиться ВСЕРЕДИНІ Layout, тому бокове меню не зникатиме */}
           <Route path="team" element={<Team profile={profile} />} />
         </Route>
         

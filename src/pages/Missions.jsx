@@ -1,7 +1,8 @@
-import { useState, useMemo, useEffect, useCallback } from 'react';
-import { MapContainer, TileLayer, Marker, Popup, useMapEvents, Polyline, GeoJSON } from 'react-leaflet';
+import { useState, useMemo, useEffect, useCallback, useRef } from 'react';
+import { MapContainer, TileLayer, Marker, Popup, useMapEvents, Polyline, GeoJSON, useMap } from 'react-leaflet';
 import L from 'leaflet';
-import { Trash2, RotateCw, Database, FolderOpen, Download, AlertTriangle, Undo2, XCircle, Archive, ArchiveRestore, Calendar, Activity } from 'lucide-react';
+// ОНОВЛЕНО: Додано імпорт іконки Clock
+import { Trash2, RotateCw, Database, FolderOpen, Download, AlertTriangle, Undo2, XCircle, Archive, ArchiveRestore, Calendar, Activity, ShieldAlert, Edit3, Clock } from 'lucide-react';
 import { supabase } from '../supabaseClient';
 import { useLocation, useNavigate } from 'react-router-dom';
 
@@ -11,11 +12,10 @@ let DefaultIcon = L.icon({ iconUrl: icon, shadowUrl: iconShadow, iconSize: [25, 
 L.Marker.prototype.options.icon = DefaultIcon;
 
 const midPointIcon = L.divIcon({ className: 'custom-midpoint', html: '<div style="width: 12px; height: 12px; background: white; border: 2px solid #3b82f6; border-radius: 50%; opacity: 0.8; box-shadow: 0 0 3px rgba(0,0,0,0.5); cursor: pointer;"></div>', iconSize: [12, 12], iconAnchor: [6, 6] });
-const noFlyPolygon = [[31.28786087036133, 51.55775618957977], [31.340904235839847, 51.54793631537473], [31.339530944824222, 51.53939557112958], [31.28665924072266, 51.54708231308613]];
-const noFlyZoneData = { "type": "FeatureCollection", "features": [{ "type": "Feature", "properties": { "name": "Restricted Area (Pivtsi Airfield)" }, "geometry": { "type": "Polygon", "coordinates": [[...noFlyPolygon, noFlyPolygon[0]]] } }] };
 
 function ccw(A, B, C) { return (C[1] - A[1]) * (B[0] - A[0]) > (B[1] - A[1]) * (C[0] - A[0]); }
 function doIntersect(A, B, C, D) { return ccw(A, C, D) !== ccw(B, C, D) && ccw(A, B, C) !== ccw(A, B, D); }
+
 function isPointInsidePolygon(point, polygon) {
     let x = point[0], y = point[1], inside = false;
     for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
@@ -24,6 +24,75 @@ function isPointInsidePolygon(point, polygon) {
         if (intersect) inside = !inside;
     }
     return inside;
+}
+
+function NFZManager({ setDynamicNfz, setIsLoadingNfz }) {
+    const map = useMap();
+    const timeoutRef = useRef(null);
+
+    const fetchZones = async () => {
+        setIsLoadingNfz(true);
+        const bounds = map.getBounds();
+        const bbox = `${bounds.getSouth()},${bounds.getWest()},${bounds.getNorth()},${bounds.getEast()}`;
+        
+        const query = `
+            [out:json][timeout:15];
+            (
+              way["aeroway"~"aerodrome|heliport"](${bbox});
+              way["military"](${bbox});
+              way["power"~"plant"](${bbox});
+              way["amenity"~"hospital|prison"](${bbox});
+            );
+            out geom;
+        `;
+
+        try {
+            const response = await fetch('https://overpass-api.de/api/interpreter', {
+                method: 'POST',
+                body: query
+            });
+            const data = await response.json();
+            
+            const features = data.elements.map(el => {
+                if (el.type === 'way' && el.geometry && el.geometry.length > 2) {
+                    const coords = el.geometry.map(g => [g.lon, g.lat]);
+                    if (coords[0][0] !== coords[coords.length - 1][0] || coords[0][1] !== coords[coords.length - 1][1]) {
+                        coords.push(coords[0]);
+                    }
+                    
+                    let rawType = el.tags?.name || el.tags?.military || el.tags?.aeroway || el.tags?.amenity || el.tags?.power;
+                    if (!rawType || rawType === "yes") {
+                        return null;
+                    }
+
+                    let typeName = rawType.charAt(0).toUpperCase() + rawType.slice(1);
+
+                    return {
+                        type: "Feature",
+                        properties: { name: `NFZ: ${typeName}`, color: "#ef4444" },
+                        geometry: { type: "Polygon", coordinates: [coords] }
+                    };
+                }
+                return null;
+            }).filter(Boolean); 
+
+            setDynamicNfz({ type: "FeatureCollection", features });
+        } catch (error) {
+            console.error("Failed to fetch NFZ from OpenStreetMap:", error);
+        }
+        setIsLoadingNfz(false);
+    };
+
+    useEffect(() => { fetchZones(); }, []);
+
+    useMapEvents({
+        moveend: () => {
+            clearTimeout(timeoutRef.current);
+            timeoutRef.current = setTimeout(fetchZones, 1500);
+        }
+    });
+
+    return null;
 }
 
 function Missions({ profile }) {
@@ -35,6 +104,9 @@ function Missions({ profile }) {
     const [drones, setDrones] = useState([]);
     const [selectedDroneId, setSelectedDroneId] = useState('');
     const [isLoading, setIsLoading] = useState(false);
+
+    const [dynamicNfz, setDynamicNfz] = useState({ type: "FeatureCollection", features: [] });
+    const [isLoadingNfz, setIsLoadingNfz] = useState(false);
 
     const location = useLocation();
     const navigate = useNavigate();
@@ -89,7 +161,6 @@ function Missions({ profile }) {
         if (!error) setSavedMissions(data);
     };
 
-    // ОНОВЛЕНО: Фільтрація дронів залежно від ролі
     const fetchDrones = async () => {
         const { data: allDrones } = await supabase.from('drones').select('id, name, model').order('name', { ascending: true });
         if (profile.role === 'admin') {
@@ -133,39 +204,65 @@ function Missions({ profile }) {
         if (!error) fetchMissions();
     };
 
-    const totalDistance = useMemo(() => {
-        let dist = 0;
-        for (let i = 0; i < waypoints.length - 1; i++) dist += L.latLng(waypoints[i].lat, waypoints[i].lng).distanceTo(L.latLng(waypoints[i + 1].lat, waypoints[i + 1].lng));
-        return dist;
+    // ОНОВЛЕНО: Розрахунок дистанції ТА ЧАСУ
+    const { totalDistance, estimatedTime } = useMemo(() => {
+        let dist = 0; 
+        let time = 0;
+        for (let i = 0; i < waypoints.length - 1; i++) {
+            const d = L.latLng(waypoints[i].lat, waypoints[i].lng).distanceTo(L.latLng(waypoints[i + 1].lat, waypoints[i + 1].lng));
+            dist += d;
+            const speed = waypoints[i].speed > 0 ? waypoints[i].speed : 5; // Захист від ділення на нуль
+            time += d / speed;
+        }
+        return { totalDistance: dist, estimatedTime: time };
     }, [waypoints]);
 
+    // ФУНКЦІЯ ФОРМАТУВАННЯ ЧАСУ
+    const formatTime = (seconds) => {
+        if (!seconds) return "0s";
+        const m = Math.floor(seconds / 60); 
+        const s = Math.round(seconds % 60);
+        return `${m > 0 ? m + 'm ' : ''}${s}s`;
+    };
+
     const hasViolation = useMemo(() => {
-        if (waypoints.length === 0) return false;
-        for (let wp of waypoints) { if (isPointInsidePolygon([wp.lng, wp.lat], noFlyPolygon)) return true; }
-        for (let i = 0; i < waypoints.length - 1; i++) {
-            let A = [waypoints[i].lng, waypoints[i].lat], B = [waypoints[i+1].lng, waypoints[i+1].lat];
-            for (let j = 0; j < noFlyPolygon.length; j++) {
-                let C = noFlyPolygon[j], D = noFlyPolygon[(j + 1) % noFlyPolygon.length];
-                if (doIntersect(A, B, C, D)) return true;
+        if (waypoints.length === 0 || !dynamicNfz.features) return false;
+        
+        for (let feature of dynamicNfz.features) {
+            const polygonCoords = feature.geometry.coordinates[0]; 
+            
+            for (let wp of waypoints) { 
+                if (isPointInsidePolygon([wp.lng, wp.lat], polygonCoords)) return true; 
+            }
+            
+            for (let i = 0; i < waypoints.length - 1; i++) {
+                let A = [waypoints[i].lng, waypoints[i].lat];
+                let B = [waypoints[i+1].lng, waypoints[i+1].lat];
+                
+                for (let j = 0; j < polygonCoords.length - 1; j++) {
+                    let C = polygonCoords[j];
+                    let D = polygonCoords[j + 1];
+                    if (doIntersect(A, B, C, D)) return true;
+                }
             }
         }
         return false;
-    }, [waypoints]);
+    }, [waypoints, dynamicNfz]);
 
     const midpoints = useMemo(() => {
         const mids = [];
         for (let i = 0; i < waypoints.length - 1; i++) {
             const wp1 = waypoints[i], wp2 = waypoints[i + 1];
-            mids.push({ lat: (wp1.lat + wp2.lat) / 2, lng: (wp1.lng + wp2.lng) / 2, insertIndex: i + 1, alt: Math.round((wp1.alt + wp2.alt) / 2), speed: Math.round((wp1.speed + wp2.speed) / 2) });
+            mids.push({ lat: (wp1.lat + wp2.lat) / 2, lng: (wp1.lng + wp2.lng) / 2, insertIndex: i + 1, alt: Math.round((wp1.alt + wp2.alt) / 2), speed: Math.round((wp1.speed + wp2.speed) / 2), name: "" });
         }
         return mids;
     }, [waypoints]);
 
-    function MapEvents() { useMapEvents({ click(e) { setEditingPoint({ lat: e.latlng.lat, lng: e.latlng.lng, alt: 50, speed: 5, isNew: true }); } }); return null; }
+    function MapEvents() { useMapEvents({ click(e) { setEditingPoint({ lat: e.latlng.lat, lng: e.latlng.lng, alt: 50, speed: 5, name: "", isNew: true }); } }); return null; }
 
     const handleMarkerDragStart = () => { setHistory(prev => [...prev, waypoints]); setEditingPoint(null); };
     const handleMarkerDrag = (e, id) => { const position = e.target.getLatLng(); setWaypoints(prev => prev.map(wp => wp.id === id ? { ...wp, lat: position.lat, lng: position.lng } : wp)); };
-    const handleMidpointDragStart = (e, mid) => { setHistory(prev => [...prev, waypoints]); const position = e.target.getLatLng(); const newWp = { id: Date.now(), lat: position.lat, lng: position.lng, alt: mid.alt, speed: mid.speed, isNew: false }; setWaypoints(prev => { const newArray = [...prev]; newArray.splice(mid.insertIndex, 0, newWp); return newArray; }); };
+    const handleMidpointDragStart = (e, mid) => { setHistory(prev => [...prev, waypoints]); const position = e.target.getLatLng(); const newWp = { id: Date.now(), lat: position.lat, lng: position.lng, alt: mid.alt, speed: mid.speed, name: "", isNew: false }; setWaypoints(prev => { const newArray = [...prev]; newArray.splice(mid.insertIndex, 0, newWp); return newArray; }); };
     const confirmWaypoint = () => { if (editingPoint.isNew) updateWaypointsWithHistory([...waypoints, { ...editingPoint, id: Date.now(), isNew: false }]); else updateWaypointsWithHistory(waypoints.map(wp => wp.id === editingPoint.id ? editingPoint : wp)); setEditingPoint(null); };
     const removeWaypoint = (id) => { updateWaypointsWithHistory(waypoints.filter(wp => wp.id !== id)); if (editingPoint?.id === id) setEditingPoint(null); };
     const makeCircular = () => { if (waypoints.length < 2) return; const firstPoint = { ...waypoints[0], id: Date.now(), isNew: false }; updateWaypointsWithHistory([...waypoints, firstPoint]); };
@@ -209,17 +306,35 @@ function Missions({ profile }) {
 
                 {hasViolation && (
                     <div style={{ background: '#fef2f2', border: '1px solid #ef4444', color: '#b91c1c', padding: '10px', borderRadius: '8px', marginBottom: '10px', display: 'flex', alignItems: 'center', gap: '10px', fontWeight: '600' }}>
-                        <AlertTriangle size={20} /> Route Violation: The flight path intersects a No-Fly Zone. Please adjust the route.
+                        <AlertTriangle size={20} /> Route Violation: The flight path intersects a Restricted Zone. Please adjust the route.
                     </div>
                 )}
 
-                <div style={{ flex: 1, background: 'white', borderRadius: '12px', padding: '10px', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)' }}>
+                <div style={{ flex: 1, background: 'white', borderRadius: '12px', padding: '10px', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)', position: 'relative' }}>
+                    
+                    {isLoadingNfz && (
+                        <div style={{ position: 'absolute', top: '20px', right: '20px', zIndex: 1000, background: 'white', padding: '8px 12px', borderRadius: '8px', fontSize: '13px', fontWeight: 'bold', color: '#3b82f6', display: 'flex', alignItems: 'center', gap: '8px', boxShadow: '0 2px 10px rgba(0,0,0,0.1)' }}>
+                            <ShieldAlert size={16} className="animate-spin" /> Scanning Area for NFZ...
+                        </div>
+                    )}
+
                     <MapContainer center={[51.5300, 31.3100]} zoom={12} style={{ height: '100%', width: '100%', borderRadius: '8px' }}>
                         <TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />
-                        <GeoJSON data={noFlyZoneData} style={{ color: '#ef4444', fillColor: '#ef4444', fillOpacity: 0.3, weight: 2 }} onEachFeature={(feature, layer) => layer.bindPopup(`<strong>⛔ ${feature.properties.name}</strong><br/>No flights allowed.`)} />
+                        
+                        <NFZManager setDynamicNfz={setDynamicNfz} setIsLoadingNfz={setIsLoadingNfz} />
+
+                        {dynamicNfz.features.length > 0 && (
+                            <GeoJSON 
+                                key={JSON.stringify(dynamicNfz)} 
+                                data={dynamicNfz} 
+                                style={(feature) => ({ color: feature.properties.color, fillColor: feature.properties.color, fillOpacity: 0.3, weight: 2 })} 
+                                onEachFeature={(feature, layer) => layer.bindPopup(`<strong>⛔ ${feature.properties.name}</strong><br/>No flights allowed.`)} 
+                            />
+                        )}
+                        
                         {waypoints.map((wp, index) => (
                             <Marker key={wp.id} position={[wp.lat, wp.lng]} draggable={true} eventHandlers={{ dragstart: handleMarkerDragStart, drag: (e) => handleMarkerDrag(e, wp.id) }}>
-                                <Popup><div style={{ textAlign: 'center' }}><strong>Waypoint #{index + 1}</strong><br/><div style={{ display: 'flex', gap: '5px', marginTop: '10px' }}><button onClick={() => setEditingPoint({ ...wp, isNew: false })} style={miniButtonStyle}>Edit</button><button onClick={() => removeWaypoint(wp.id)} style={{ ...miniButtonStyle, background: '#ef4444' }}>Delete</button></div></div></Popup>
+                                <Popup><div style={{ textAlign: 'center' }}><strong>{wp.name ? `${wp.name} (#${index + 1})` : `Waypoint #${index + 1}`}</strong><br/><div style={{ display: 'flex', gap: '5px', marginTop: '10px' }}><button onClick={() => setEditingPoint({ ...wp, isNew: false })} style={miniButtonStyle}>Edit</button><button onClick={() => removeWaypoint(wp.id)} style={{ ...miniButtonStyle, background: '#ef4444' }}>Delete</button></div></div></Popup>
                             </Marker>
                         ))}
                         {midpoints.map((mid, idx) => ( <Marker key={`mid-${idx}`} position={[mid.lat, mid.lng]} icon={midPointIcon} draggable={true} eventHandlers={{ dragstart: (e) => handleMidpointDragStart(e, mid), dragend: (e) => { const newPos = e.target.getLatLng(); setWaypoints(prev => { const newWp = [...prev]; newWp[mid.insertIndex].lat = newPos.lat; newWp[mid.insertIndex].lng = newPos.lng; return newWp; }); } }}></Marker> ))}
@@ -235,6 +350,7 @@ function Missions({ profile }) {
                     <div style={{ marginBottom: '20px', border: editingPoint.isNew ? '2px solid #3b82f6' : '2px solid #f59e0b', padding: '15px', borderRadius: '10px' }}>
                         <h3 style={{ marginTop: 0 }}>{editingPoint.isNew ? 'Add Point' : 'Edit Point'}</h3>
                         <div style={{ display: 'grid', gap: '12px' }}>
+                            <div><label style={labelStyle}>Label (Optional) <input type="text" value={editingPoint.name || ''} onChange={e => setEditingPoint({...editingPoint, name: e.target.value})} placeholder="e.g., Target Alpha" style={inputStyle} /></label></div>
                             <div style={{ display: 'flex', gap: '10px' }}><label style={labelStyle}>Lat <input type="number" value={editingPoint.lat} onChange={e => setEditingPoint({...editingPoint, lat: parseFloat(e.target.value)})} style={inputStyle} /></label><label style={labelStyle}>Lng <input type="number" value={editingPoint.lng} onChange={e => setEditingPoint({...editingPoint, lng: parseFloat(e.target.value)})} style={inputStyle} /></label></div>
                             <label style={labelStyle}>Altitude (m) <input type="number" value={editingPoint.alt} onChange={e => setEditingPoint({...editingPoint, alt: parseInt(e.target.value)})} style={inputStyle} /></label>
                             <label style={labelStyle}>Speed (m/s) <input type="number" value={editingPoint.speed} onChange={e => setEditingPoint({...editingPoint, speed: parseInt(e.target.value)})} style={inputStyle} /></label>
@@ -243,7 +359,15 @@ function Missions({ profile }) {
                     </div>
                 ) : ( <div style={{ textAlign: 'center', padding: '15px', background: '#f8fafc', borderRadius: '10px', border: '1px dashed #cbd5e1', marginBottom: '20px' }}><p style={{ color: '#64748b', margin: 0, fontSize: '14px' }}>Click map to add waypoints</p></div> )}
 
-                <div style={{ background: '#f1f5f9', padding: '15px', borderRadius: '10px', marginBottom: '20px' }}><div style={{ fontSize: '12px', color: '#64748b', fontWeight: 'bold' }}>TOTAL DISTANCE</div><div style={{ fontSize: '18px', fontWeight: '800', color: '#1e293b' }}>{totalDistance.toFixed(0)} m <span style={{ color: '#64748b', fontSize: '14px', fontWeight: '400' }}>({(totalDistance / 1000).toFixed(2)} km)</span></div></div>
+                {/* ОНОВЛЕНО: Відображаємо дистанцію та ЧАС */}
+                <div style={{ background: '#f1f5f9', padding: '15px', borderRadius: '10px', marginBottom: '20px' }}>
+                    <div style={{ fontSize: '12px', color: '#64748b', fontWeight: 'bold' }}>TOTAL DISTANCE & ESTIMATED TIME</div>
+                    <div style={{ fontSize: '18px', fontWeight: '800', color: '#1e293b' }}>
+                        {totalDistance.toFixed(0)} m <span style={{ color: '#64748b', fontSize: '14px', fontWeight: '400' }}>({(totalDistance / 1000).toFixed(2)} km)</span> 
+                        <span style={{ margin: '0 10px', color: '#cbd5e1' }}>|</span> 
+                        <Clock size={16} style={{ display: 'inline', marginBottom: '-2px', color: '#3b82f6' }}/> <span style={{ color: '#3b82f6' }}>{formatTime(estimatedTime)}</span>
+                    </div>
+                </div>
 
                 <div style={{ borderBottom: '1px solid #e2e8f0', paddingBottom: '10px', marginBottom: '10px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}><h3 style={{ margin: 0, fontSize: '16px' }}>Flight Plan</h3>{waypoints.length > 0 && <button onClick={saveMissionFile} disabled={hasViolation} style={{...miniButtonStyle, background: hasViolation ? '#94a3b8' : '#10b981', display: 'flex', alignItems: 'center', gap: '5px'}}><Download size={14}/> Export</button>}</div>
 
@@ -251,7 +375,7 @@ function Missions({ profile }) {
                     {waypoints.length === 0 && <p style={{ fontSize: '13px', color: '#94a3b8' }}>No waypoints added yet.</p>}
                     {waypoints.map((wp, index) => (
                         <div key={wp.id} style={{...waypointCardStyle, borderLeft: editingPoint?.id === wp.id ? '4px solid #f59e0b' : '4px solid #cbd5e1'}}>
-                            <div onClick={() => setEditingPoint({ ...wp, isNew: false })} style={{ cursor: 'pointer', flex: 1 }}><div style={{ fontWeight: '700', fontSize: '14px' }}>#{index + 1} Waypoint</div><div style={{ fontSize: '12px', color: '#64748b' }}>Alt: {wp.alt}m | Spd: {wp.speed}m/s</div></div>
+                            <div onClick={() => setEditingPoint({ ...wp, isNew: false })} style={{ cursor: 'pointer', flex: 1 }}><div style={{ fontWeight: '700', fontSize: '14px', display: 'flex', alignItems: 'center', gap: '6px' }}>#{index + 1} {wp.name ? <span style={{color: '#3b82f6'}}>{wp.name}</span> : 'Waypoint'} <Edit3 size={12} color="#94a3b8"/></div><div style={{ fontSize: '12px', color: '#64748b' }}>Alt: {wp.alt}m | Spd: {wp.speed}m/s</div></div>
                             <Trash2 size={18} color="#ef4444" style={{ cursor: 'pointer' }} onClick={() => removeWaypoint(wp.id)} />
                         </div>
                     ))}
@@ -292,7 +416,7 @@ function Missions({ profile }) {
 
 const labelStyle = { display: 'flex', flexDirection: 'column', fontSize: '12px', fontWeight: '600', color: '#475569', gap: '4px', flex: 1 };
 const inputStyle = { padding: '8px', borderRadius: '6px', border: '1px solid #cbd5e1', outline: 'none', fontSize: '14px' };
-const buttonStyle = { padding: '10px', color: 'white', border: 'none', borderRadius: '8px', cursor: 'pointer', fontWeight: '600', fontSize: '14px', transition: 'all 0.2s' };
+const buttonStyle = { padding: '10px 16px', color: 'white', border: 'none', borderRadius: '8px', cursor: 'pointer', fontWeight: '600', fontSize: '14px', transition: 'all 0.2s' };
 const miniButtonStyle = { padding: '4px 10px', background: '#3b82f6', color: 'white', border: 'none', borderRadius: '6px', cursor: 'pointer', fontSize: '12px', fontWeight: '600' };
 const waypointCardStyle = { display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 12px', background: '#f8fafc', borderRadius: '8px', border: '1px solid #e2e8f0' };
 

@@ -1,18 +1,22 @@
 import { useState, useEffect } from 'react';
 import { supabase } from '../supabaseClient';
 import { Target, Plus, Trash2, Battery, Weight, Cpu, Edit, Copy, Play, Archive, Activity, ShieldCheck } from 'lucide-react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useLocation } from 'react-router-dom';
 
 function Drones({ profile }) {
     const [drones, setDrones] = useState([]);
-    const [pilots, setPilots] = useState([]); // Список пілотів
-    const [droneAccess, setDroneAccess] = useState([]); // Доступи
+    const [pilots, setPilots] = useState([]); 
+    const [droneAccess, setDroneAccess] = useState([]); 
     const [isLoading, setIsLoading] = useState(false);
     const [showForm, setShowForm] = useState(false);
     const [editingId, setEditingId] = useState(null); 
-    const [expandedAccessDroneId, setExpandedAccessDroneId] = useState(null); // Відкрита панель доступу
+    const [expandedAccessDroneId, setExpandedAccessDroneId] = useState(null); 
     
     const navigate = useNavigate();
+    const location = useLocation();
+    const searchParams = new URLSearchParams(location.search);
+    const filterDroneId = searchParams.get('drone'); // ОНОВЛЕНО: Читаємо ID з URL
+    
     const isAdmin = profile?.role === 'admin';
 
     const defaultDroneState = { name: '', model: 'DJI Mavic 3', max_flight_time: 40, weight: 0.9, controller_type: 'Proprietary' };
@@ -45,7 +49,7 @@ function Drones({ profile }) {
         } else {
             await supabase.from('drone_access').insert([{ drone_id: droneId, user_id: pilotId, company_id: profile.company_id }]);
         }
-        fetchPilotsAndAccess(); // Оновлюємо доступи
+        fetchPilotsAndAccess(); 
     };
 
     const handleSaveDrone = async (e) => {
@@ -71,19 +75,26 @@ function Drones({ profile }) {
         setEditingId(drone.id); setShowForm(true); window.scrollTo({ top: 0, behavior: 'smooth' }); 
     };
 
-    const handleCloneClick = (drone) => {
-        setNewDrone({ name: `${drone.name} (Copy)`, model: drone.model, max_flight_time: drone.max_flight_time, weight: drone.weight, controller_type: drone.controller_type });
-        setEditingId(null); setShowForm(true); window.scrollTo({ top: 0, behavior: 'smooth' });
-    };
-
     const closeForm = () => { setShowForm(false); setEditingId(null); setNewDrone(defaultDroneState); };
+
+    // ОНОВЛЕНО: Фільтрація дронів, якщо є ID у URL (перехід з Dashboard)
+    const displayedDrones = filterDroneId 
+        ? drones.filter(d => String(d.id) === filterDroneId)
+        : drones;
 
     if (!profile) return null;
 
     return (
         <div style={{ padding: '20px', maxWidth: '1200px', margin: '0 auto' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
-                <h2 style={{ margin: 0, display: 'flex', alignItems: 'center', gap: '10px' }}><Target size={28} color="#3b82f6" /> Drone Fleet Registry</h2>
+                <h2 style={{ margin: 0, display: 'flex', alignItems: 'center', gap: '10px' }}>
+                    <Target size={28} color="#3b82f6" /> Drone Fleet Registry
+                    {filterDroneId && (
+                        <button onClick={() => navigate('/drones')} style={{...miniButtonStyle, marginLeft: '10px', background: '#64748b', display: 'flex', alignItems: 'center', gap: '4px'}}>
+                            Show All
+                        </button>
+                    )}
+                </h2>
                 {isAdmin && (
                     <button onClick={() => showForm ? closeForm() : setShowForm(true)} style={{ ...buttonStyle, background: showForm ? '#94a3b8' : '#3b82f6', display: 'flex', gap: '8px' }}>
                         <Plus size={18} /> {showForm ? 'Cancel' : 'Register New Drone'}
@@ -113,13 +124,13 @@ function Drones({ profile }) {
             )}
 
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))', gap: '20px' }}>
-                {drones.map(drone => {
+                {displayedDrones.map(drone => {
                     const activeMissions = drone.missions?.filter(m => !m.is_archived) || [];
                     const archivedMissions = drone.missions?.filter(m => m.is_archived) || [];
                     const flightLogs = drone.flight_logs || [];
 
                     return (
-                    <div key={drone.id} style={{ background: 'white', borderRadius: '12px', padding: '20px', boxShadow: '0 2px 4px -1px rgb(0 0 0 / 0.1)', border: '1px solid #e2e8f0', display: 'flex', flexDirection: 'column' }}>
+                    <div key={drone.id} style={{ background: 'white', borderRadius: '12px', padding: '20px', boxShadow: '0 2px 4px -1px rgb(0 0 0 / 0.1)', border: filterDroneId ? '2px solid #3b82f6' : '1px solid #e2e8f0', display: 'flex', flexDirection: 'column' }}>
                         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', borderBottom: '1px solid #f1f5f9', paddingBottom: '10px', marginBottom: '15px' }}>
                             <div>
                                 <h3 style={{ margin: '0 0 5px 0', color: '#0f172a' }}>{drone.name}</h3>
@@ -139,7 +150,6 @@ function Drones({ profile }) {
                             <div style={specStyle}><Weight size={16} color="#64748b"/> <span style={{ color: '#475569' }}>Takeoff Weight:</span> <strong style={{ marginLeft: 'auto' }}>{drone.weight} kg</strong></div>
                             <div style={specStyle}><Cpu size={16} color="#64748b"/> <span style={{ color: '#475569' }}>FC Type:</span> <strong style={{ marginLeft: 'auto', fontSize: '13px' }}>{drone.controller_type}</strong></div>
                             
-                            {/* БЛОК ДОСТУПІВ */}
                             {isAdmin && expandedAccessDroneId === drone.id && (
                                 <div style={{ background: '#f8fafc', padding: '10px', borderRadius: '8px', marginTop: '10px', border: '1px solid #e2e8f0' }}>
                                     <h4 style={{ margin: '0 0 10px 0', fontSize: '12px', color: '#4f46e5', textTransform: 'uppercase' }}>Pilot Access</h4>
@@ -156,7 +166,7 @@ function Drones({ profile }) {
                             )}
 
                             <div style={{ display: 'flex', gap: '5px', marginTop: '10px', paddingTop: '15px', borderTop: '1px dashed #cbd5e1' }}>
-                                <button onClick={() => navigate(`/missions?loadMissionId=${activeMissions[0]?.id}`)} disabled={activeMissions.length === 0} style={missionBtnStyle(activeMissions.length, '#10b981')}><Play size={14} /> Act: {activeMissions.length}</button>
+                                <button onClick={() => navigate(`/missions?drone=${drone.id}`)} disabled={activeMissions.length === 0} style={missionBtnStyle(activeMissions.length, '#10b981')}><Play size={14} /> Act: {activeMissions.length}</button>
                                 <button onClick={() => navigate(`/missions?drone=${drone.id}&tab=archived`)} disabled={archivedMissions.length === 0} style={missionBtnStyle(archivedMissions.length, '#64748b')}><Archive size={14} /> Arch: {archivedMissions.length}</button>
                                 <button onClick={() => navigate(`/logbook?drone=${drone.id}`)} disabled={flightLogs.length === 0} style={missionBtnStyle(flightLogs.length, '#3b82f6')}><Activity size={14} /> Logs: {flightLogs.length}</button>
                             </div>
@@ -173,6 +183,7 @@ const inputStyle = { width: '100%', padding: '10px', borderRadius: '8px', border
 const buttonStyle = { padding: '10px 16px', color: 'white', border: 'none', borderRadius: '8px', cursor: 'pointer', fontWeight: '600', fontSize: '14px', transition: 'all 0.2s' };
 const specStyle = { display: 'flex', alignItems: 'center', gap: '8px', fontSize: '14px' };
 const iconBtnStyle = { background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '6px', padding: '6px', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', transition: 'background 0.2s' };
+const miniButtonStyle = { padding: '4px 10px', color: 'white', border: 'none', borderRadius: '6px', cursor: 'pointer', fontSize: '12px', fontWeight: '600' };
 const missionBtnStyle = (count, color) => ({ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '4px', padding: '8px 4px', borderRadius: '8px', border: 'none', background: count > 0 ? color : '#f1f5f9', color: count > 0 ? 'white' : '#94a3b8', cursor: count > 0 ? 'pointer' : 'default', fontWeight: 'bold', fontSize: '12px' });
 
 export default Drones;

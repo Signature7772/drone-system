@@ -2,10 +2,14 @@ import { useState, useEffect, useRef, useMemo } from 'react';
 import { supabase } from '../supabaseClient';
 import Papa from 'papaparse';
 import { MapContainer, TileLayer, Polyline, CircleMarker, useMap } from 'react-leaflet';
+import L from 'leaflet';
 import { Line } from 'react-chartjs-2';
 import { Chart as ChartJS, CategoryScale, LinearScale, PointElement, LineElement, Title, Tooltip, Legend } from 'chart.js';
-import { Upload, AlertOctagon, Activity, Map as MapIcon, Database, Crosshair, Lightbulb, X, Eye, EyeOff, Target, Save, FolderOpen, Calendar, ChevronUp, ChevronDown, Trash2 } from 'lucide-react';
+import { Upload, AlertOctagon, Activity, Map as MapIcon, Database, Crosshair, Lightbulb, X, Eye, EyeOff, Target, Save, FolderOpen, Calendar, ChevronUp, ChevronDown, Trash2, Download, Navigation, Clock } from 'lucide-react';
 import { useLocation, useNavigate } from 'react-router-dom';
+
+import jsPDF from 'jspdf';
+import html2canvas from 'html2canvas';
 
 ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, Title, Tooltip, Legend);
 
@@ -28,9 +32,15 @@ const adviceDatabase = {
     time: "Flight Time Exceeded: The drone flew longer than its rated maximum flight time. Plan shorter survey routes."
 };
 
-function FitBounds({ bounds }) {
+function MapController({ bounds, isPdfMode }) {
     const map = useMap();
-    useEffect(() => { if (bounds && bounds.length > 0) map.fitBounds(bounds, { padding: [50, 50] }); }, [bounds, map]);
+    useEffect(() => { if (bounds && bounds.length > 0) { map.fitBounds(bounds, { padding: [50, 50] }); } }, [bounds, map]);
+    useEffect(() => {
+        setTimeout(() => {
+            map.invalidateSize();
+            if (bounds && bounds.length > 0) { map.fitBounds(bounds, { padding: [50, 50], animate: false }); }
+        }, 300);
+    }, [isPdfMode, map, bounds]);
     return null;
 }
 
@@ -51,7 +61,14 @@ function Logbook({ profile }) {
     const [showAnomalies, setShowAnomalies] = useState(true);
     
     const [logName, setLogName] = useState('');
+    const [actualFlightDistance, setActualFlightDistance] = useState(0); 
+    const [actualFlightTime, setActualFlightTime] = useState(0); 
+    const [actualAnomaliesCount, setActualAnomaliesCount] = useState(0); 
+
     const [isSavingLog, setIsSavingLog] = useState(false);
+    
+    const [isExporting, setIsExporting] = useState(false);
+    const [isPdfMode, setIsPdfMode] = useState(false);
 
     const [isReportOpen, setIsReportOpen] = useState(true);
     const [isChartOpen, setIsChartOpen] = useState(true);
@@ -65,10 +82,7 @@ function Logbook({ profile }) {
     const filterDroneId = searchParams.get('drone');
 
     useEffect(() => {
-        if (profile?.company_id) {
-            fetchMissions();
-            fetchLogs();
-        }
+        if (profile?.company_id) { fetchMissions(); fetchLogs(); }
     }, [profile]);
 
     useEffect(() => {
@@ -78,14 +92,17 @@ function Logbook({ profile }) {
         }
     }, [filterMissionId, savedMissions]);
 
-    // ОНОВЛЕНО: Фільтрація дронів залежно від ролі (для отримання правильних місій)
+    useEffect(() => {
+        const bounds = [];
+        if (selectedMission && selectedMission.waypoints) bounds.push(...selectedMission.waypoints.map(wp => [wp.lat, wp.lng]));
+        if (telemetryData && telemetryData.length > 0) bounds.push(...telemetryData.map(dp => [dp.lat, dp.lng]));
+        if (bounds.length > 0) setMapBounds(bounds);
+    }, [selectedMission, telemetryData]);
+
     const fetchMissions = async () => {
-        const { data: allMissions } = await supabase.from('missions').select('*, drones(name), flight_logs(id)').order('created_at', { ascending: false });
-        
-        if (profile.role === 'admin') {
-            setSavedMissions(allMissions || []);
-        } else {
-            // Пілот бачить місії ТІЛЬКИ тих дронів, до яких має доступ
+        const { data: allMissions } = await supabase.from('missions').select('*, drones(name, model, max_flight_time), flight_logs(id)').order('created_at', { ascending: false });
+        if (profile.role === 'admin') setSavedMissions(allMissions || []);
+        else {
             const { data: myAccess } = await supabase.from('drone_access').select('drone_id').eq('user_id', profile.id);
             if (myAccess && allMissions) {
                 const allowedIds = myAccess.map(a => a.drone_id);
@@ -102,27 +119,74 @@ function Logbook({ profile }) {
     const handleMissionSelect = (e) => {
         const mission = savedMissions.find(m => m.id === parseInt(e.target.value));
         setSelectedMission(mission || null);
-        if (mission) {
-            setLogName(`Analysis: ${mission.name}`); 
-            if (mission.waypoints.length > 0) setMapBounds(mission.waypoints.map(wp => [wp.lat, wp.lng]));
-        } else setLogName('');
-        setTelemetryData([]); setAnomalies([]);
+        if (mission) setLogName(`Analysis: ${mission.name}`); 
+        else setLogName('');
+        
+        setTelemetryData([]); setAnomalies([]); setActualFlightDistance(0); setActualFlightTime(0); setActualAnomaliesCount(0);
+    };
+
+    const calculateDistanceSafely = (dataArray) => {
+        let dist = 0;
+        for (let i = 0; i < dataArray.length - 1; i++) {
+            const lat1 = parseFloat(dataArray[i].lat);
+            const lng1 = parseFloat(dataArray[i].lng);
+            const lat2 = parseFloat(dataArray[i+1].lat);
+            const lng2 = parseFloat(dataArray[i+1].lng);
+            if (!isNaN(lat1) && !isNaN(lng1) && !isNaN(lat2) && !isNaN(lng2)) {
+                dist += L.latLng(lat1, lng1).distanceTo(L.latLng(lat2, lng2));
+            }
+        }
+        return dist;
+    };
+
+    const formatTime = (seconds) => {
+        if (!seconds) return "0s";
+        const m = Math.floor(seconds / 60); 
+        const s = Math.round(seconds % 60);
+        return `${m > 0 ? m + 'm ' : ''}${s}s`;
     };
 
     const handleFileUpload = (event) => {
         const file = event.target.files[0];
         if (!file) return;
         Papa.parse(file, {
-            header: true, dynamicTyping: true, 
+            header: true, dynamicTyping: true, skipEmptyLines: true,
             complete: (results) => {
-                const normalizedData = results.data.filter(row => row.lat && row.lng).map(row => ({
-                    time: row.time || row.TimeMs || 0, lat: row.lat || row.Latitude, lng: row.lng || row.Longitude,
-                    alt: row.alt || row.Altitude || 0, speed: row.speed || row.GroundSpeed || 0, 
-                    battery: row.battery || row.Voltage || 12.0, satellites: row.satellites || row.num_sats || 10
-                }));
+                const normalizedData = results.data
+                    .filter(row => (row.lat !== undefined || row.Latitude !== undefined) && (row.lng !== undefined || row.Longitude !== undefined))
+                    .map((row, index) => {
+                        let rawLat = row.lat !== undefined ? row.lat : row.Latitude;
+                        let rawLng = row.lng !== undefined ? row.lng : row.Longitude;
+                        let cleanLat = typeof rawLat === 'string' ? parseFloat(rawLat.replace(',', '.')) : parseFloat(rawLat);
+                        let cleanLng = typeof rawLng === 'string' ? parseFloat(rawLng.replace(',', '.')) : parseFloat(rawLng);
+                        
+                        // РОЗУМНИЙ ПАРСЕР ЧАСУ: Перевіряє формат (секунди, мілісекунди або просто індекс)
+                        let parsedTime = 0;
+                        if (row.time !== undefined) parsedTime = parseFloat(row.time);
+                        else if (row.TimeMs !== undefined) parsedTime = parseFloat(row.TimeMs) / 1000;
+                        else parsedTime = index; // Якщо часу немає, вважаємо кожну точку = 1 сек
+
+                        return {
+                            time: parsedTime, 
+                            lat: cleanLat, 
+                            lng: cleanLng,
+                            alt: parseFloat(row.alt || row.Altitude || 0), 
+                            speed: parseFloat(row.speed || row.GroundSpeed || 0), 
+                            battery: parseFloat(row.battery || row.Voltage || 12.0), 
+                            satellites: parseInt(row.satellites || row.num_sats || 10)
+                        };
+                    })
+                    .filter(row => !isNaN(row.lat) && !isNaN(row.lng)); 
+                
+                const calculatedDist = calculateDistanceSafely(normalizedData);
+                const detectedErrs = runAnomalyDetector(normalizedData, selectedMission?.waypoints, selectedMission?.drones);
+                
+                const fTime = normalizedData.length > 0 ? (normalizedData[normalizedData.length - 1].time - normalizedData[0].time) : 0;
+                
+                setActualFlightDistance(calculatedDist);
+                setActualFlightTime(fTime > 0 ? fTime : normalizedData.length);
+                setActualAnomaliesCount(detectedErrs.length);
                 setTelemetryData(normalizedData);
-                runAnomalyDetector(normalizedData, selectedMission?.waypoints, selectedMission?.drones);
-                if (normalizedData.length > 0) setMapBounds(normalizedData.map(dp => [dp.lat, dp.lng]));
             }
         });
     };
@@ -130,17 +194,47 @@ function Logbook({ profile }) {
     const saveLogToDB = async () => {
         if (!selectedMission || telemetryData.length === 0) return;
         setIsSavingLog(true);
-        const { error } = await supabase.from('flight_logs').insert([{ mission_id: selectedMission.id, drone_id: selectedMission.drone_id, name: logName || 'Unnamed Analysis', telemetry_data: telemetryData, company_id: profile.company_id }]);
+        const { error } = await supabase.from('flight_logs').insert([{ 
+            mission_id: selectedMission.id, drone_id: selectedMission.drone_id, 
+            name: logName || 'Unnamed Analysis', telemetry_data: telemetryData, 
+            actual_distance: actualFlightDistance, 
+            flight_time: actualFlightTime, 
+            anomalies_count: actualAnomaliesCount,
+            company_id: profile.company_id 
+        }]);
         setIsSavingLog(false);
         if (error) alert('Error: ' + error.message);
         else { alert('Analysis Saved Successfully!'); setLogName(`Analysis: ${selectedMission.name}`); fetchLogs(); }
     };
 
-    const loadLogFromDB = (log) => {
+    const loadLogFromDB = async (log) => {
         const mission = savedMissions.find(m => m.id === log.mission_id);
-        setSelectedMission(mission || null); setLogName(log.name); setTelemetryData(log.telemetry_data); 
-        runAnomalyDetector(log.telemetry_data, mission?.waypoints, mission?.drones);
-        if (log.telemetry_data.length > 0) setMapBounds(log.telemetry_data.map(dp => [dp.lat, dp.lng]));
+        setSelectedMission(mission || null); 
+        setLogName(log.name); 
+        
+        const validData = (log.telemetry_data || []).map(dp => ({
+            ...dp, lat: parseFloat(dp.lat), lng: parseFloat(dp.lng)
+        }));
+        setTelemetryData(validData); 
+        
+        let dist = log.actual_distance || 0;
+        let time = log.flight_time || 0;
+        let aCount = log.anomalies_count; 
+        
+        const detectedErrs = runAnomalyDetector(validData, mission?.waypoints, mission?.drones);
+        
+        let needsDbHeal = false;
+        if (dist === 0 && validData.length > 1) { dist = calculateDistanceSafely(validData); needsDbHeal = true; }
+        if (time === 0 && validData.length > 1) { time = validData[validData.length - 1].time - validData[0].time; if(time <= 0) time = validData.length; needsDbHeal = true; }
+        if (aCount === null || aCount === undefined) { aCount = detectedErrs.length; needsDbHeal = true; }
+        
+        if (needsDbHeal) {
+            await supabase.from('flight_logs').update({ actual_distance: dist, flight_time: time, anomalies_count: aCount }).eq('id', log.id);
+        }
+        
+        setActualFlightDistance(dist);
+        setActualFlightTime(time);
+        setActualAnomaliesCount(aCount);
         setIsReportOpen(true); setIsChartOpen(true);
     };
 
@@ -149,6 +243,31 @@ function Logbook({ profile }) {
         const { error } = await supabase.from('flight_logs').delete().eq('id', id);
         if (error) alert('Error deleting log: ' + error.message);
         else fetchLogs();
+    };
+
+    const handleExportPDF = async (e) => {
+        e.stopPropagation();
+        setIsExporting(true); setIsPdfMode(true); 
+        setTimeout(() => {
+            window.dispatchEvent(new Event('resize')); 
+            setTimeout(async () => {
+                try {
+                    const element = document.getElementById('logbook-report');
+                    if (!element) return;
+                    const canvas = await html2canvas(element, { scale: 2, useCORS: true });
+                    const imgData = canvas.toDataURL('image/png');
+                    const pdf = new jsPDF('p', 'mm', 'a4');
+                    const pdfWidth = pdf.internal.pageSize.getWidth();
+                    const pdfHeight = (canvas.height * pdfWidth) / canvas.width;
+                    pdf.addImage(imgData, 'PNG', 0, 0, pdfWidth, pdfHeight);
+                    pdf.save(`${logName || 'flight-report'}.pdf`);
+                } catch (error) {
+                    console.error("PDF Export failed:", error); alert("Failed to generate PDF. Make sure all maps and charts are loaded.");
+                }
+                setIsPdfMode(false); setIsExporting(false);
+                setTimeout(() => window.dispatchEvent(new Event('resize')), 100);
+            }, 1500); 
+        }, 100);
     };
 
     const runAnomalyDetector = (factData, planData, droneData) => {
@@ -169,6 +288,8 @@ function Logbook({ profile }) {
         });
         const uniqueAnomalies = detectedAnomalies.filter((v, i, a) => a.findIndex(t => (t.text === v.text)) === i);
         setAnomalies(uniqueAnomalies.slice(0, 10)); setCourseErrorTimes(cTimes); setPointErrorTimes(pTimes); setAnomalyTypes(types);
+        
+        return uniqueAnomalies;
     };
 
     useEffect(() => {
@@ -177,8 +298,8 @@ function Logbook({ profile }) {
             if (hoveredPoint) {
                 const index = telemetryData.findIndex(d => d.time === hoveredPoint.time);
                 if (index !== -1) {
-                    chart.setActiveElements([{ datasetIndex: 0, index }, { datasetIndex: 1, index }, { datasetIndex: 2, index }]);
-                    chart.tooltip.setActiveElements([{ datasetIndex: 0, index }, { datasetIndex: 1, index }, { datasetIndex: 2, index }], { x: chart.scales.x.getPixelForTick(index), y: chart.scales.yAlt.getPixelForValue(hoveredPoint.alt) });
+                    chart.setActiveElements([{ datasetIndex: 0, index }, { datasetIndex: 1, index }, { datasetIndex: 2, index }, { datasetIndex: 3, index }]);
+                    chart.tooltip.setActiveElements([{ datasetIndex: 0, index }, { datasetIndex: 1, index }, { datasetIndex: 2, index }, { datasetIndex: 3, index }], { x: chart.scales.x.getPixelForTick(index), y: chart.scales.yAlt.getPixelForValue(hoveredPoint.alt) });
                 }
             } else { chart.setActiveElements([]); chart.tooltip.setActiveElements([], { x: 0, y: 0 }); }
             chart.update('none'); 
@@ -190,11 +311,21 @@ function Logbook({ profile }) {
         datasets: [
             { label: 'Altitude (m)', data: telemetryData.map(d => d.alt), borderColor: '#3b82f6', backgroundColor: 'rgba(59, 130, 246, 0.5)', yAxisID: 'yAlt' },
             { label: 'Speed (m/s)', data: telemetryData.map(d => d.speed), borderColor: '#f59e0b', backgroundColor: 'rgba(245, 158, 11, 0.5)', yAxisID: 'yAlt', borderDash: [5, 5] },
+            { label: 'Satellites', data: telemetryData.map(d => d.satellites), borderColor: '#8b5cf6', backgroundColor: 'rgba(139, 92, 246, 0.5)', yAxisID: 'yAlt', borderDash: [2, 2] },
             { label: 'Battery (V)', data: telemetryData.map(d => d.battery), borderColor: '#ef4444', backgroundColor: 'rgba(239, 68, 68, 0.5)', yAxisID: 'yBat' }
         ]
     };
 
-    const chartOptions = { responsive: true, maintainAspectRatio: false, interaction: { mode: 'index', intersect: false }, onHover: (event, activeElements) => { if (activeElements.length > 0) { const point = telemetryData[activeElements[0].index]; if (!hoveredPoint || hoveredPoint.time !== point.time) setHoveredPoint(point); } else { if (hoveredPoint) setHoveredPoint(null); } }, scales: { yAlt: { type: 'linear', display: true, position: 'left', title: { display: true, text: 'Alt(m) / Speed(m/s)'} }, yBat: { type: 'linear', display: true, position: 'right', title: { display: true, text: 'Voltage (V)'}, grid: { drawOnChartArea: false } }, } };
+    const chartOptions = { 
+        responsive: true, maintainAspectRatio: false, 
+        animation: !isPdfMode, 
+        interaction: { mode: 'index', intersect: false }, 
+        onHover: (event, activeElements) => { if (activeElements.length > 0) { const point = telemetryData[activeElements[0].index]; if (!hoveredPoint || hoveredPoint.time !== point.time) setHoveredPoint(point); } else { if (hoveredPoint) setHoveredPoint(null); } }, 
+        scales: { 
+            yAlt: { type: 'linear', display: true, position: 'left', title: { display: true, text: 'Alt / Spd / Sats'} }, 
+            yBat: { type: 'linear', display: true, position: 'right', title: { display: true, text: 'Voltage (V)'}, grid: { drawOnChartArea: false } }, 
+        } 
+    };
 
     const customPlugins = useMemo(() => [{ id: 'external-crosshair', afterDraw: (chart) => { if (hoveredPoint) { const index = telemetryData.findIndex(d => d.time === hoveredPoint.time); if (index === -1) return; const ctx = chart.ctx; const x = chart.scales.x.getPixelForTick(index); ctx.save(); ctx.beginPath(); ctx.moveTo(x, chart.chartArea.top); ctx.lineTo(x, chart.chartArea.bottom); ctx.lineWidth = 2; ctx.strokeStyle = '#eab308'; ctx.setLineDash([5, 5]); ctx.stroke(); ctx.restore(); } } }], [hoveredPoint, telemetryData]);
 
@@ -206,7 +337,7 @@ function Logbook({ profile }) {
 
     return (
         <div style={{ display: 'flex', flexDirection: 'column', gap: '20px', height: 'calc(100vh - 80px)', position: 'relative' }}>
-            {showTips && ( <div style={modalOverlayStyle}><div style={modalContentStyle}><div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid #e2e8f0', paddingBottom: '10px', marginBottom: '15px' }}><h2 style={{ margin: 0, display: 'flex', alignItems: 'center', gap: '10px' }}><Lightbulb color="#f59e0b" /> Incident Analysis & Recommendations</h2><button onClick={() => setShowTips(false)} style={{ background: 'none', border: 'none', cursor: 'pointer' }}><X size={24} color="#64748b" /></button></div>{anomalyTypes.size === 0 ? ( <p>No critical issues detected in this flight log. The flight was successful.</p> ) : ( <div style={{ display: 'flex', flexDirection: 'column', gap: '15px' }}><p style={{ margin: 0, color: '#475569' }}>Based on the telemetry data, we recommend reviewing the following systems:</p>{Array.from(anomalyTypes).map(type => ( <div key={type} style={{ background: '#f8fafc', padding: '15px', borderRadius: '8px', borderLeft: '4px solid #f59e0b' }}><strong>{type.toUpperCase()}:</strong> {adviceDatabase[type]}</div> ))}</div> )}</div></div> )}
+            {showTips && !isPdfMode && ( <div style={modalOverlayStyle}><div style={modalContentStyle}><div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid #e2e8f0', paddingBottom: '10px', marginBottom: '15px' }}><h2 style={{ margin: 0, display: 'flex', alignItems: 'center', gap: '10px' }}><Lightbulb color="#f59e0b" /> Incident Analysis & Recommendations</h2><button onClick={() => setShowTips(false)} style={{ background: 'none', border: 'none', cursor: 'pointer' }}><X size={24} color="#64748b" /></button></div>{anomalyTypes.size === 0 ? ( <p>No critical issues detected in this flight log. The flight was successful.</p> ) : ( <div style={{ display: 'flex', flexDirection: 'column', gap: '15px' }}><p style={{ margin: 0, color: '#475569' }}>Based on the telemetry data, we recommend reviewing the following systems:</p>{Array.from(anomalyTypes).map(type => ( <div key={type} style={{ background: '#f8fafc', padding: '15px', borderRadius: '8px', borderLeft: '4px solid #f59e0b' }}><strong>{type.toUpperCase()}:</strong> {adviceDatabase[type]}</div> ))}</div> )}</div></div> )}
 
             <div style={{ display: 'flex', gap: '20px', background: 'white', padding: '20px', borderRadius: '12px', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)' }}>
                 <div style={{ flex: 1 }}>
@@ -230,64 +361,150 @@ function Logbook({ profile }) {
                 </div>
             </div>
 
-            <div style={{ display: 'flex', gap: '20px', flex: 1, minHeight: 0 }}>
-                <div style={{ flex: 1.5, background: 'white', borderRadius: '12px', padding: '15px', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)', display: 'flex', flexDirection: 'column' }}>
+            <div id="logbook-report" style={
+                isPdfMode ? {
+                    width: '1000px', background: 'white', padding: '40px', position: 'absolute', top: 0, left: 0, zIndex: 99999, display: 'flex', flexDirection: 'column', gap: '20px'
+                } : {
+                    display: 'flex', gap: '20px', flex: 1, minHeight: 0, background: '#f8fafc', padding: '10px', borderRadius: '12px'
+                }
+            }>
+                {isPdfMode && (
+                    <div style={{ borderBottom: '2px solid #e2e8f0', paddingBottom: '15px' }}>
+                        <h1 style={{ margin: '0 0 10px 0', color: '#0f172a' }}>Flight Analysis Report</h1>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '14px', color: '#475569' }}>
+                            <div>
+                                <strong>Analysis Name:</strong> {logName || 'Unnamed Analysis'}<br/>
+                                <strong>Date Generated:</strong> {new Date().toLocaleString('en-GB')}
+                            </div>
+                            <div style={{ textAlign: 'right' }}>
+                                <strong>Flown Distance:</strong> {(actualFlightDistance / 1000).toFixed(2)} km<br/>
+                                <strong>Flight Time:</strong> {formatTime(actualFlightTime)} | <strong>Issues:</strong> {actualAnomaliesCount}<br/>
+                                {selectedMission?.drones && (<><strong>Assigned Fleet:</strong> {selectedMission.drones.name} ({selectedMission.drones.model})</>)}
+                            </div>
+                        </div>
+                    </div>
+                )}
+
+                <div style={{
+                    flex: isPdfMode ? 'none' : 1.5,
+                    height: isPdfMode ? '450px' : 'auto', 
+                    background: 'white', borderRadius: '12px', padding: '15px', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)', display: 'flex', flexDirection: 'column'
+                }}>
                     <h3 style={{ margin: '0 0 10px 0', display: 'flex', alignItems: 'center', gap: '8px', fontSize: '16px' }}><MapIcon size={20}/> Flight Path Overlay</h3>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}><div style={{ display: 'flex', gap: '15px', fontSize: '13px', fontWeight: 'bold' }}><div onClick={() => setShowPlanned(!showPlanned)} style={{ display: 'flex', alignItems: 'center', gap: '4px', color: '#3b82f6', cursor: 'pointer', opacity: showPlanned ? 1 : 0.4, transition: 'opacity 0.2s' }}>{showPlanned ? <Eye size={16}/> : <EyeOff size={16}/>} ─── Planned</div><div onClick={() => setShowActual(!showActual)} style={{ display: 'flex', alignItems: 'center', gap: '4px', color: '#fca5a5', cursor: 'pointer', opacity: showActual ? 1 : 0.4, transition: 'opacity 0.2s' }}>{showActual ? <Eye size={16}/> : <EyeOff size={16}/>} - - - Actual</div><div onClick={() => setShowAnomalies(!showAnomalies)} style={{ display: 'flex', alignItems: 'center', gap: '4px', color: '#991b1b', cursor: 'pointer', opacity: showAnomalies ? 1 : 0.4, transition: 'opacity 0.2s' }}>{showAnomalies ? <Eye size={16}/> : <EyeOff size={16}/>} ───/● Anomalies</div></div></div>
+                    {!isPdfMode && ( <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}><div style={{ display: 'flex', gap: '15px', fontSize: '13px', fontWeight: 'bold' }}><div onClick={() => setShowPlanned(!showPlanned)} style={{ display: 'flex', alignItems: 'center', gap: '4px', color: '#3b82f6', cursor: 'pointer', opacity: showPlanned ? 1 : 0.4, transition: 'opacity 0.2s' }}>{showPlanned ? <Eye size={16}/> : <EyeOff size={16}/>} ─── Planned</div><div onClick={() => setShowActual(!showActual)} style={{ display: 'flex', alignItems: 'center', gap: '4px', color: '#fca5a5', cursor: 'pointer', opacity: showActual ? 1 : 0.4, transition: 'opacity 0.2s' }}>{showActual ? <Eye size={16}/> : <EyeOff size={16}/>} - - - Actual</div><div onClick={() => setShowAnomalies(!showAnomalies)} style={{ display: 'flex', alignItems: 'center', gap: '4px', color: '#991b1b', cursor: 'pointer', opacity: showAnomalies ? 1 : 0.4, transition: 'opacity 0.2s' }}>{showAnomalies ? <Eye size={16}/> : <EyeOff size={16}/>} ───/● Anomalies</div></div></div> )}
                     <div style={{ flex: 1, borderRadius: '8px', overflow: 'hidden', border: '1px solid #e2e8f0', position: 'relative' }}>
-                        <MapContainer center={[51.5300, 31.3100]} zoom={14} style={{ height: '100%', width: '100%' }}>
+                        <MapContainer preferCanvas={true} center={[51.5300, 31.3100]} zoom={14} style={{ height: '100%', width: '100%' }}>
                             <TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />
-                            <FitBounds bounds={mapBounds} />
+                            <MapController bounds={mapBounds} isPdfMode={isPdfMode} />
                             {selectedMission && showPlanned && <Polyline positions={selectedMission.waypoints.map(wp => [wp.lat, wp.lng])} color="#3b82f6" weight={4} opacity={0.5} />}
                             {showActual && telemetryData.length > 0 && <Polyline positions={telemetryData.map(dp => [dp.lat, dp.lng])} color="#fca5a5" weight={3} dashArray="8, 8" />}
                             {showAnomalies && telemetryData.length > 0 && telemetryData.slice(0, -1).map((dp, i) => { const nextDp = telemetryData[i + 1]; if (courseErrorTimes.has(dp.time) || courseErrorTimes.has(nextDp.time)) return <Polyline key={`act-seg-${i}`} positions={[[dp.lat, dp.lng], [nextDp.lat, nextDp.lng]]} color="#991b1b" weight={5} />; return null; })}
                             {showAnomalies && telemetryData.map((dp, i) => { if (pointErrorTimes.has(dp.time)) return <CircleMarker key={`anomaly-pt-${i}`} center={[dp.lat, dp.lng]} radius={5} pathOptions={{ color: '#991b1b', fillColor: '#ef4444', fillOpacity: 1, weight: 2 }} interactive={false} />; return null; })}
-                            {telemetryData.map((dp, i) => <CircleMarker key={`hitbox-${i}`} center={[dp.lat, dp.lng]} radius={12} opacity={0} fillOpacity={0} eventHandlers={{ mouseover: () => setHoveredPoint(dp), mouseout: () => setHoveredPoint(null) }} />)}
-                            {hoveredPoint && <CircleMarker center={[hoveredPoint.lat, hoveredPoint.lng]} radius={7} interactive={false} pathOptions={{ color: 'black', fillColor: '#eab308', fillOpacity: 1, weight: 2 }} />}
+                            {!isPdfMode && telemetryData.map((dp, i) => <CircleMarker key={`hitbox-${i}`} center={[dp.lat, dp.lng]} radius={12} opacity={0} fillOpacity={0} eventHandlers={{ mouseover: () => setHoveredPoint(dp), mouseout: () => setHoveredPoint(null) }} />)}
+                            {hoveredPoint && !isPdfMode && <CircleMarker center={[hoveredPoint.lat, hoveredPoint.lng]} radius={7} interactive={false} pathOptions={{ color: 'black', fillColor: '#eab308', fillOpacity: 1, weight: 2 }} />}
                         </MapContainer>
                     </div>
                 </div>
 
-                <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: '15px', overflowY: 'auto', paddingRight: '5px' }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', background: hoveredPoint ? '#fefce8' : '#f8fafc', padding: '12px', borderRadius: '10px', border: '1px solid #e2e8f0', transition: 'all 0.2s' }}><div style={{ fontSize: '13px', color: '#475569', fontWeight: 'bold' }}><Crosshair size={14} style={{ marginBottom: '-2px', marginRight: '4px' }}/> LIVE TRACKER: {hoveredPoint ? `${hoveredPoint.time}s` : 'Hover map, chart, or report'}</div>{hoveredPoint && ( <div style={{ fontSize: '13px', fontWeight: '600', display: 'flex', gap: '15px' }}><span style={{ color: '#3b82f6' }}>Alt: {hoveredPoint.alt}m</span><span style={{ color: '#f59e0b' }}>Spd: {hoveredPoint.speed}m/s</span><span style={{ color: '#ef4444' }}>Bat: {hoveredPoint.battery}V</span></div> )}</div>
-
-                    <div style={{ background: anomalies.length > 0 ? '#fef2f2' : '#f0fdf4', border: anomalies.length > 0 ? '1px solid #f87171' : '1px solid #86efac', borderRadius: '12px', padding: '15px' }}>
-                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', cursor: 'pointer' }} onClick={() => setIsReportOpen(!isReportOpen)}>
-                            <h3 style={{ margin: 0, color: anomalies.length > 0 ? '#b91c1c' : '#166534', display: 'flex', alignItems: 'center', gap: '8px', fontSize: '16px' }}><AlertOctagon size={20} /> Post-Flight Report</h3>
-                            <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>{anomalies.length > 0 && ( <button onClick={(e) => { e.stopPropagation(); setShowTips(true); }} style={{ background: '#fef08a', color: '#854d0e', border: '1px solid #fde047', padding: '4px 10px', borderRadius: '6px', cursor: 'pointer', fontWeight: 'bold', fontSize: '12px', display: 'flex', alignItems: 'center', gap: '5px' }}><Lightbulb size={14} /> Get Tips</button> )}{isReportOpen ? <ChevronUp size={20} color="#64748b"/> : <ChevronDown size={20} color="#64748b"/>}</div>
+                {isPdfMode ? (
+                    <>
+                        <div style={{ display: 'flex', gap: '20px' }}>
+                            <div style={{ flex: 1, background: anomalies.length > 0 ? '#fef2f2' : '#f0fdf4', border: anomalies.length > 0 ? '1px solid #f87171' : '1px solid #86efac', borderRadius: '12px', padding: '15px' }}>
+                                <h3 style={{ margin: '0 0 10px 0', color: anomalies.length > 0 ? '#b91c1c' : '#166534', display: 'flex', alignItems: 'center', gap: '8px', fontSize: '16px' }}><AlertOctagon size={20} /> Post-Flight Report</h3>
+                                {anomalies.length === 0 ? ( <p style={{ color: '#166534', margin: 0, fontSize: '14px' }}>No anomalies detected. Flight was successful.</p> ) : ( <ul style={{ color: '#991b1b', margin: 0, paddingLeft: '20px', fontSize: '13px', lineHeight: '1.5' }}>{anomalies.map((a, i) => <li key={i} style={{ marginBottom: '4px' }}>{a.text}</li>)}</ul> )}
+                            </div>
+                            <div style={{ flex: 1, background: '#fffbeb', border: '1px solid #fde047', borderRadius: '12px', padding: '15px' }}>
+                                <h3 style={{ margin: '0 0 10px 0', color: '#854d0e', display: 'flex', alignItems: 'center', gap: '8px', fontSize: '16px' }}><Lightbulb size={20} /> Recommendations</h3>
+                                {anomalyTypes.size === 0 ? ( <p style={{ color: '#854d0e', margin: 0, fontSize: '14px' }}>No recommendations required.</p> ) : ( <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', fontSize: '13px', color: '#854d0e' }}>{Array.from(anomalyTypes).map(type => ( <div key={type}><strong>{type.toUpperCase()}:</strong> {adviceDatabase[type]}</div> ))}</div> )}
+                            </div>
                         </div>
-                        {isReportOpen && ( <div style={{ marginTop: '15px' }}>{anomalies.length === 0 ? ( <p style={{ color: '#166534', margin: 0, fontSize: '14px' }}>Waiting for log data or no anomalies detected.</p> ) : ( <ul style={{ color: '#991b1b', margin: 0, paddingLeft: '20px', fontSize: '13px', lineHeight: '1.5' }}>{anomalies.map((a, i) => ( <li key={i} onMouseEnter={() => { const point = telemetryData.find(d => d.time === a.time); if (point) setHoveredPoint(point); }} onMouseLeave={() => setHoveredPoint(null)} style={{ marginBottom: '4px', background: hoveredPoint?.time === a.time ? '#fef08a' : 'transparent', transition: 'background 0.2s', cursor: 'pointer', padding: '2px 4px', borderRadius: '4px' }}>{a.text}</li> ))}</ul> )}</div> )}
-                    </div>
+                        <div style={{ background: 'white', borderRadius: '12px', padding: '15px', border: '1px solid #e2e8f0' }}>
+                            <h3 style={{ margin: '0 0 10px 0', display: 'flex', alignItems: 'center', gap: '8px', fontSize: '16px', color: '#0f172a' }}><Activity size={20} /> Telemetry Analysis</h3>
+                            <div style={{ height: '300px', position: 'relative' }}>{telemetryData.length > 0 && <Line data={chartData} options={chartOptions} />}</div>
+                        </div>
+                    </>
+                ) : (
+                    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: '15px', overflowY: 'auto', paddingRight: '5px' }}>
+                        
+                        {telemetryData.length > 0 && (
+                            <div style={{ display: 'grid', gridTemplateColumns: selectedMission ? '1fr 1fr 1fr 1fr' : '1fr 1fr 1fr', gap: '10px', marginBottom: '10px' }}>
+                                <div style={{ background: '#e0f2fe', border: '1px solid #bae6fd', padding: '12px', borderRadius: '10px', display: 'flex', flexDirection: 'column' }}>
+                                    <span style={{ fontSize: '10px', color: '#0284c7', fontWeight: 'bold', textTransform: 'uppercase' }}>Flown Distance</span>
+                                    <span style={{ fontSize: '18px', color: '#0369a1', fontWeight: '900' }}>{(actualFlightDistance / 1000).toFixed(2)} km</span>
+                                </div>
+                                
+                                {selectedMission && (
+                                    <div style={{ background: '#d1fae5', border: '1px solid #a7f3d0', padding: '12px', borderRadius: '10px', display: 'flex', flexDirection: 'column' }}>
+                                        <span style={{ fontSize: '10px', color: '#059669', fontWeight: 'bold', textTransform: 'uppercase' }}>Planned Distance</span>
+                                        <span style={{ fontSize: '18px', color: '#047857', fontWeight: '900' }}>{(selectedMission.total_distance / 1000).toFixed(2)} km</span>
+                                    </div>
+                                )}
 
-                    <div style={{ background: 'white', borderRadius: '12px', padding: '15px', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)', display: 'flex', flexDirection: 'column' }}>
-                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', cursor: 'pointer' }} onClick={() => setIsChartOpen(!isChartOpen)}><h3 style={{ margin: 0, display: 'flex', alignItems: 'center', gap: '8px', fontSize: '16px' }}><Activity size={20}/> Telemetry Analysis</h3>{isChartOpen ? <ChevronUp size={20} color="#64748b"/> : <ChevronDown size={20} color="#64748b"/>}</div>
-                        {isChartOpen && ( <div style={{ height: '200px', position: 'relative', marginTop: '15px' }}>{telemetryData.length > 0 ? ( <Line ref={chartRef} data={chartData} options={chartOptions} plugins={customPlugins} /> ) : ( <div style={{ height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#94a3b8', fontSize: '14px', border: '1px dashed #cbd5e1', borderRadius: '8px' }}>Upload a CSV log to view charts</div> )}</div> )}
-                    </div>
+                                <div style={{ background: '#f3e8ff', border: '1px solid #ddd6fe', padding: '12px', borderRadius: '10px', display: 'flex', flexDirection: 'column' }}>
+                                    <span style={{ fontSize: '10px', color: '#7c3aed', fontWeight: 'bold', textTransform: 'uppercase' }}>Flight Time</span>
+                                    <span style={{ fontSize: '18px', color: '#6d28d9', fontWeight: '900' }}>{formatTime(actualFlightTime)}</span>
+                                </div>
 
-                    <div style={{ background: 'white', borderRadius: '12px', padding: '15px', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)' }}>
-                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', cursor: 'pointer', borderBottom: isHistoryOpen ? '1px solid #e2e8f0' : 'none', paddingBottom: isHistoryOpen ? '10px' : '0', marginBottom: isHistoryOpen ? '15px' : '0' }} onClick={() => setIsHistoryOpen(!isHistoryOpen)}><h3 style={{ margin: 0, display: 'flex', alignItems: 'center', gap: '8px', fontSize: '16px' }}><FolderOpen size={20}/> Saved Analysis History</h3>{isHistoryOpen ? <ChevronUp size={20} color="#64748b"/> : <ChevronDown size={20} color="#64748b"/>}</div>
-                        {isHistoryOpen && (
-                            <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', maxHeight: '300px', overflowY: 'auto', paddingRight: '5px' }}>
-                                {displayedLogs.length === 0 ? <p style={{ fontSize: '13px', color: '#94a3b8' }}>No saved logs found.</p> : 
-                                    displayedLogs.map((log) => (
-                                        <div key={log.id} style={waypointCardStyle}>
-                                            <div>
-                                                <div style={{ fontWeight: 'bold', fontSize: '14px', color: '#0f172a' }}>{log.name || 'Unnamed Analysis'}</div>
-                                                <div style={{ fontSize: '12px', color: '#475569' }}>Mission: {log.missions?.name || 'Unknown'}</div>
-                                                <div style={{ fontSize: '11px', color: '#64748b', display: 'flex', alignItems: 'center', gap: '4px', margin: '4px 0' }}><Calendar size={10} /> {new Date(log.created_at).toLocaleString('en-GB')}</div>
-                                                {log.drones && <span style={{ fontSize: '11px', color: '#10b981', fontWeight: '600' }}>🎯 {log.drones.name}</span>}
-                                            </div>
-                                            <div style={{ display: 'flex', gap: '5px' }}>
-                                                <button onClick={() => loadLogFromDB(log)} style={miniButtonStyle}>Load</button>
-                                                <button onClick={() => deleteLogFromDB(log.id)} style={{...miniButtonStyle, background: '#ef4444', padding: '4px 6px'}}><Trash2 size={14} /></button>
-                                            </div>
-                                        </div>
-                                    ))
-                                }
+                                <div style={{ background: actualAnomaliesCount > 0 ? '#fef2f2' : '#f0fdf4', border: actualAnomaliesCount > 0 ? '1px solid #fecaca' : '1px solid #bbf7d0', padding: '12px', borderRadius: '10px', display: 'flex', flexDirection: 'column' }}>
+                                    <span style={{ fontSize: '10px', color: actualAnomaliesCount > 0 ? '#e11d48' : '#059669', fontWeight: 'bold', textTransform: 'uppercase' }}>Issues Found</span>
+                                    <span style={{ fontSize: '18px', color: actualAnomaliesCount > 0 ? '#be123c' : '#047857', fontWeight: '900' }}>{actualAnomaliesCount}</span>
+                                </div>
                             </div>
                         )}
+
+                        <div style={{ display: 'flex', justifyContent: 'space-between', background: hoveredPoint ? '#fefce8' : '#f8fafc', padding: '12px', borderRadius: '10px', border: '1px solid #e2e8f0', transition: 'all 0.2s' }}>
+                            <div style={{ fontSize: '13px', color: '#475569', fontWeight: 'bold' }}>
+                                <Crosshair size={14} style={{ marginBottom: '-2px', marginRight: '4px' }}/> 
+                                {hoveredPoint ? `LIVE TRACKER: ${hoveredPoint.time}s` : 'Hover over map or chart to track point'}
+                            </div>
+                            {hoveredPoint && ( <div style={{ fontSize: '13px', fontWeight: '600', display: 'flex', gap: '15px' }}><span style={{ color: '#3b82f6' }}>Alt: {hoveredPoint.alt}m</span><span style={{ color: '#f59e0b' }}>Spd: {hoveredPoint.speed}m/s</span><span style={{ color: '#ef4444' }}>Bat: {hoveredPoint.battery}V</span></div> )}
+                        </div>
+
+                        <div style={{ background: anomalies.length > 0 ? '#fef2f2' : '#f0fdf4', border: anomalies.length > 0 ? '1px solid #f87171' : '1px solid #86efac', borderRadius: '12px', padding: '15px' }}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', cursor: 'pointer' }} onClick={() => setIsReportOpen(!isReportOpen)}>
+                                <h3 style={{ margin: 0, color: anomalies.length > 0 ? '#b91c1c' : '#166534', display: 'flex', alignItems: 'center', gap: '8px', fontSize: '16px' }}><AlertOctagon size={20} /> Post-Flight Report</h3>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                                    {telemetryData.length > 0 && (
+                                        <button onClick={handleExportPDF} disabled={isExporting} style={{ background: '#3b82f6', color: 'white', border: 'none', padding: '4px 10px', borderRadius: '6px', cursor: isExporting ? 'wait' : 'pointer', fontWeight: 'bold', fontSize: '12px', display: 'flex', alignItems: 'center', gap: '5px' }}>
+                                            <Download size={14} /> {isExporting ? 'Exporting...' : 'Export PDF'}
+                                        </button>
+                                    )}
+                                    {anomalies.length > 0 && ( <button onClick={(e) => { e.stopPropagation(); setShowTips(true); }} style={{ background: '#fef08a', color: '#854d0e', border: '1px solid #fde047', padding: '4px 10px', borderRadius: '6px', cursor: 'pointer', fontWeight: 'bold', fontSize: '12px', display: 'flex', alignItems: 'center', gap: '5px' }}><Lightbulb size={14} /> Get Tips</button> )}
+                                    {isReportOpen ? <ChevronUp size={20} color="#64748b"/> : <ChevronDown size={20} color="#64748b"/>}
+                                </div>
+                            </div>
+                            {isReportOpen && ( <div style={{ marginTop: '15px' }}>{anomalies.length === 0 ? ( <p style={{ color: '#166534', margin: 0, fontSize: '14px' }}>Waiting for log data or no anomalies detected.</p> ) : ( <ul style={{ color: '#991b1b', margin: 0, paddingLeft: '20px', fontSize: '13px', lineHeight: '1.5' }}>{anomalies.map((a, i) => ( <li key={i} onMouseEnter={() => { const point = telemetryData.find(d => d.time === a.time); if (point) setHoveredPoint(point); }} onMouseLeave={() => setHoveredPoint(null)} style={{ marginBottom: '4px', background: hoveredPoint?.time === a.time ? '#fef08a' : 'transparent', transition: 'background 0.2s', cursor: 'pointer', padding: '2px 4px', borderRadius: '4px' }}>{a.text}</li> ))}</ul> )}</div> )}
+                        </div>
+
+                        <div style={{ background: 'white', borderRadius: '12px', padding: '15px', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)', display: 'flex', flexDirection: 'column' }}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', cursor: 'pointer' }} onClick={() => setIsChartOpen(!isChartOpen)}><h3 style={{ margin: 0, display: 'flex', alignItems: 'center', gap: '8px', fontSize: '16px' }}><Activity size={20}/> Telemetry Analysis</h3>{isChartOpen ? <ChevronUp size={20} color="#64748b"/> : <ChevronDown size={20} color="#64748b"/>}</div>
+                            {isChartOpen && ( <div style={{ height: '200px', position: 'relative', marginTop: '15px' }}>{telemetryData.length > 0 ? ( <Line ref={chartRef} data={chartData} options={chartOptions} customPlugins={customPlugins} /> ) : ( <div style={{ height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#94a3b8', fontSize: '14px', border: '1px dashed #cbd5e1', borderRadius: '8px' }}>Upload a CSV log to view charts</div> )}</div> )}
+                        </div>
+
+                        <div style={{ background: 'white', borderRadius: '12px', padding: '15px', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)' }}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', cursor: 'pointer', borderBottom: isHistoryOpen ? '1px solid #e2e8f0' : 'none', paddingBottom: isHistoryOpen ? '10px' : '0', marginBottom: isHistoryOpen ? '15px' : '0' }} onClick={() => setIsHistoryOpen(!isHistoryOpen)}><h3 style={{ margin: 0, display: 'flex', alignItems: 'center', gap: '8px', fontSize: '16px' }}><FolderOpen size={20}/> Saved Analysis History</h3>{isHistoryOpen ? <ChevronUp size={20} color="#64748b"/> : <ChevronDown size={20} color="#64748b"/>}</div>
+                            {isHistoryOpen && (
+                                <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', maxHeight: '300px', overflowY: 'auto', paddingRight: '5px' }}>
+                                    {displayedLogs.length === 0 ? <p style={{ fontSize: '13px', color: '#94a3b8' }}>No saved logs found.</p> : 
+                                        displayedLogs.map((log) => (
+                                            <div key={log.id} style={waypointCardStyle}>
+                                                <div>
+                                                    <div style={{ fontWeight: 'bold', fontSize: '14px', color: '#0f172a' }}>{log.name || 'Unnamed Analysis'}</div>
+                                                    <div style={{ fontSize: '12px', color: '#475569' }}>Mission: {log.missions?.name || 'Unknown'}</div>
+                                                    <div style={{ fontSize: '11px', color: '#64748b', display: 'flex', alignItems: 'center', gap: '4px', margin: '4px 0' }}><Calendar size={10} /> {new Date(log.created_at).toLocaleString('en-GB')}</div>
+                                                </div>
+                                                <div style={{ display: 'flex', gap: '5px' }}>
+                                                    <button onClick={() => loadLogFromDB(log)} style={miniButtonStyle}>Load</button>
+                                                    <button onClick={() => deleteLogFromDB(log.id)} style={{...miniButtonStyle, background: '#ef4444', padding: '4px 6px'}}><Trash2 size={14} /></button>
+                                                </div>
+                                            </div>
+                                        ))
+                                    }
+                                </div>
+                            )}
+                        </div>
                     </div>
-                </div>
+                )}
             </div>
         </div>
     );
