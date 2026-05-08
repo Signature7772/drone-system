@@ -1,16 +1,124 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
 import { supabase } from '../supabaseClient';
 import { useNavigate } from 'react-router-dom';
 import { 
     LayoutDashboard, Target, Map as MapIcon, Activity, 
     TrendingUp, Clock, Navigation, Calendar as CalendarIcon,
-    ChevronDown, ChevronUp, Send, Plane, AlertOctagon
+    ChevronDown, ChevronUp, Send, Plane, AlertOctagon, Download,
+    List, BarChart2
 } from 'lucide-react';
 import { Line } from 'react-chartjs-2';
-import { Chart as ChartJS, CategoryScale, LinearScale, LogarithmicScale, PointElement, LineElement, Title, Tooltip, Legend } from 'chart.js';
+import { Chart as ChartJS, CategoryScale, LinearScale, PointElement, LineElement, Title, Tooltip, Legend } from 'chart.js';
+import zoomPlugin from 'chartjs-plugin-zoom';
 
-// ОНОВЛЕНО: Додано LogarithmicScale
-ChartJS.register(CategoryScale, LinearScale, LogarithmicScale, PointElement, LineElement, Title, Tooltip, Legend);
+import jsPDF from 'jspdf';
+import html2canvas from 'html2canvas';
+
+ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, Title, Tooltip, Legend, zoomPlugin);
+
+// === КОНФІГ ДИНАМІЧНИХ ГРАФІКІВ ДАШБОРДА ===
+const DASHBOARD_METRICS = [
+    { id: 'distance', label: 'Flown Distance', unit: 'km', color: '#f59e0b', icon: <Navigation size={16}/> },
+    { id: 'time', label: 'Flight Time', unit: 'hrs', color: '#0284c7', icon: <Clock size={16}/> },
+    { id: 'errors', label: 'Critical Incidents', unit: 'Incidents', color: '#ef4444', icon: <AlertOctagon size={16}/> },
+    { id: 'logs', label: 'Analyzed Flights', unit: 'Flights', color: '#8b5cf6', icon: <Activity size={16}/> },
+    { id: 'missions', label: 'Planned Missions', unit: 'Missions', color: '#10b981', icon: <MapIcon size={16}/> },
+];
+
+// === КОМПОНЕНТ ОКРЕМОГО ГРАФІКА ===
+const DashboardChart = ({ metric, labels, data, isPdfMode }) => {
+    const [isExpanded, setIsExpanded] = useState(true);
+    const [showTable, setShowTable] = useState(false);
+    const chartRef = useRef(null);
+
+    useEffect(() => {
+        if (isPdfMode) { setIsExpanded(true); setShowTable(false); }
+    }, [isPdfMode]);
+
+    const chartData = {
+        labels,
+        datasets: [{
+            label: `${metric.label} (${metric.unit})`,
+            data,
+            borderColor: metric.color,
+            backgroundColor: `${metric.color}33`,
+            fill: true,
+            tension: 0.3,
+            pointRadius: 3,
+            pointHoverRadius: 6
+        }]
+    };
+
+    const chartOptions = {
+        responsive: true, maintainAspectRatio: false, animation: !isPdfMode,
+        plugins: {
+            legend: { display: false },
+            zoom: {
+                pan: { enabled: true, mode: 'x' },
+                zoom: { wheel: { enabled: true }, pinch: { enabled: true }, mode: 'x' }
+            }
+        },
+        scales: {
+            x: { ticks: { maxTicksLimit: 10 } },
+            y: { beginAtZero: true, title: { display: true, text: `${metric.label} (${metric.unit})` }, ticks: { precision: 0 } }
+        }
+    };
+
+    // Не малюємо графік, якщо всі дані нульові (щоб не засмічувати інтерфейс)
+    const totalSum = data.reduce((acc, val) => acc + val, 0);
+    if (totalSum === 0 && !isPdfMode) return null; 
+
+    return (
+        <div className={isPdfMode ? "pdf-block" : ""} style={{ background: 'white', borderRadius: '12px', padding: '20px', border: '1px solid #e2e8f0', marginBottom: '15px', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <h3 style={{ margin: 0, display: 'flex', alignItems: 'center', gap: '8px', fontSize: '16px', color: metric.color }}>
+                    {metric.icon} {metric.label} Over Time
+                </h3>
+                <div style={{ display: 'flex', gap: '10px' }}>
+                    <button 
+                        onClick={() => setShowTable(!showTable)} 
+                        style={{ padding: '4px 10px', borderRadius: '6px', cursor: 'pointer', fontSize: '12px', fontWeight: '600', display: 'flex', alignItems: 'center', gap: '5px', background: showTable ? '#3b82f6' : '#f1f5f9', color: showTable ? 'white' : '#475569', border: '1px solid #cbd5e1' }}
+                    >
+                        {showTable ? <BarChart2 size={14}/> : <List size={14}/>}
+                        {showTable ? 'View Chart' : 'View Data'}
+                    </button>
+                    <button onClick={() => setIsExpanded(!isExpanded)} style={{ background:'none', border:'none', cursor:'pointer', color: '#64748b' }}>
+                        {isExpanded ? <ChevronUp size={18}/> : <ChevronDown size={18}/>}
+                    </button>
+                </div>
+            </div>
+            
+            {isExpanded && (
+                <div style={{ marginTop: '15px' }}>
+                    {showTable ? (
+                        <div style={{ maxHeight: '250px', overflowY: 'auto', border: '1px solid #e2e8f0', borderRadius: '8px' }}>
+                            <table style={{ width: '100%', fontSize: '12px', textAlign: 'left', borderCollapse: 'collapse' }}>
+                                <thead style={{ position: 'sticky', top: 0, background: '#f8fafc', boxShadow: '0 1px 2px rgba(0,0,0,0.1)' }}>
+                                    <tr>
+                                        <th style={{ padding: '10px 12px', color: '#475569' }}>Date</th>
+                                        <th style={{ padding: '10px 12px', color: metric.color }}>{metric.label} ({metric.unit})</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {labels.map((date, i) => (
+                                        <tr key={i} style={{ borderBottom: '1px solid #f1f5f9' }}>
+                                            <td style={{ padding: '8px 12px', color: '#64748b' }}>{date}</td>
+                                            <td style={{ padding: '8px 12px', fontWeight: '500' }}>{data[i] !== 0 ? data[i] : '-'}</td>
+                                        </tr>
+                                    ))}
+                                </tbody>
+                            </table>
+                        </div>
+                    ) : (
+                        <div style={{ height: '220px', position: 'relative' }}>
+                            <Line ref={chartRef} data={chartData} options={chartOptions} />
+                        </div>
+                    )}
+                </div>
+            )}
+        </div>
+    );
+};
 
 function Dashboard({ profile }) {
     const navigate = useNavigate(); 
@@ -35,11 +143,21 @@ function Dashboard({ profile }) {
     const [isLogsOpen, setIsLogsOpen] = useState(true);
     const [isMissionsOpen, setIsMissionsOpen] = useState(true);
 
+    const [isExporting, setIsExporting] = useState(false);
+    const [isPdfMode, setIsPdfMode] = useState(false);
+
     useEffect(() => {
         if (profile?.company_id) {
             fetchDashboardData();
         }
     }, [profile, timeRange]); 
+
+    useEffect(() => {
+        if (isPdfMode) {
+            setIsLogsOpen(true);
+            setIsMissionsOpen(true);
+        }
+    }, [isPdfMode]);
 
     const fetchDashboardData = async () => {
         setLoading(true);
@@ -127,13 +245,62 @@ function Dashboard({ profile }) {
         return (seconds / 3600).toFixed(2);
     };
 
-    const chartData = useMemo(() => {
+    const handleExportPDF = async (e) => {
+        e.stopPropagation();
+        setIsExporting(true); 
+        setIsPdfMode(true); 
+        
+        setTimeout(() => {
+            window.dispatchEvent(new Event('resize')); 
+            setTimeout(async () => {
+                try {
+                    const pdf = new jsPDF('p', 'mm', 'a4');
+                    const pdfWidth = pdf.internal.pageSize.getWidth();
+                    const pdfHeight = pdf.internal.pageSize.getHeight();
+                    
+                    const marginX = 10;
+                    const maxImgWidth = pdfWidth - (marginX * 2);
+                    let currentY = 10; 
+                    let isFirstPage = true;
+
+                    const blocks = document.querySelectorAll('.pdf-block');
+
+                    for (let i = 0; i < blocks.length; i++) {
+                        const block = blocks[i];
+                        
+                        const canvas = await html2canvas(block, { scale: 2, useCORS: true });
+                        const imgData = canvas.toDataURL('image/png');
+                        
+                        const imgHeight = (canvas.height * maxImgWidth) / canvas.width;
+
+                        if (currentY + imgHeight > pdfHeight - 10 && !isFirstPage) {
+                            pdf.addPage();
+                            currentY = 10;
+                        }
+                        
+                        pdf.addImage(imgData, 'PNG', marginX, currentY, maxImgWidth, imgHeight);
+                        currentY += imgHeight + 5; 
+                        isFirstPage = false;
+                    }
+
+                    const fileNameDate = new Date().toLocaleDateString('en-GB').replace(/\//g, '-');
+                    pdf.save(`Fleet-Dashboard-Report-${fileNameDate}.pdf`);
+                } catch (error) {
+                    console.error("PDF Export failed:", error); 
+                    alert("Failed to generate PDF. Make sure all charts are loaded.");
+                }
+                
+                setIsPdfMode(false); 
+                setIsExporting(false);
+                setTimeout(() => window.dispatchEvent(new Event('resize')), 100);
+            }, 1500); 
+        }, 100);
+    };
+
+    // === ФОРМУВАННЯ АГРЕГОВАНИХ ДАНИХ ДЛЯ КОЖНОЇ МЕТРИКИ ===
+    const aggregatedData = useMemo(() => {
         const labels = [];
-        const logsCounts = [];
-        const missionsCounts = [];
-        const distCounts = [];
-        const errorsCounts = []; 
-        const timeCounts = []; // ОНОВЛЕНО: Дані для часу
+        const dataMap = { logs: [], missions: [], distance: [], errors: [], time: [] };
         
         if (timeRange === 'week' || timeRange === 'month') {
             const daysToShow = timeRange === 'week' ? 7 : 30;
@@ -141,24 +308,24 @@ function Dashboard({ profile }) {
                 const d = new Date();
                 d.setDate(d.getDate() - i);
                 labels.push(d.toLocaleDateString('en-GB', { day: '2-digit', month: '2-digit' }));
-                logsCounts.push(0); missionsCounts.push(0); distCounts.push(0); errorsCounts.push(0); timeCounts.push(0);
+                Object.keys(dataMap).forEach(k => dataMap[k].push(0));
             }
 
             chartLogs.forEach(item => {
                 const dateStr = new Date(item.created_at).toLocaleDateString('en-GB', { day: '2-digit', month: '2-digit' });
                 const index = labels.indexOf(dateStr);
                 if (index !== -1) { 
-                    logsCounts[index] += 1; 
-                    distCounts[index] += (item.actual_distance || 0); 
-                    errorsCounts[index] += (item.anomalies_count || 0); 
-                    timeCounts[index] += (item.flight_time || 0);
+                    dataMap.logs[index] += 1; 
+                    dataMap.distance[index] += (item.actual_distance || 0); 
+                    dataMap.errors[index] += (item.anomalies_count || 0); 
+                    dataMap.time[index] += (item.flight_time || 0);
                 }
             });
 
             chartMissions.forEach(item => {
                 const dateStr = new Date(item.created_at).toLocaleDateString('en-GB', { day: '2-digit', month: '2-digit' });
                 const index = labels.indexOf(dateStr);
-                if (index !== -1) missionsCounts[index] += 1;
+                if (index !== -1) dataMap.missions[index] += 1;
             });
 
         } else {
@@ -166,159 +333,95 @@ function Dashboard({ profile }) {
                 const d = new Date();
                 d.setMonth(d.getMonth() - i);
                 labels.push(d.toLocaleDateString('en-GB', { month: 'short', year: '2-digit' })); 
-                logsCounts.push(0); missionsCounts.push(0); distCounts.push(0); errorsCounts.push(0); timeCounts.push(0);
+                Object.keys(dataMap).forEach(k => dataMap[k].push(0));
             }
 
             chartLogs.forEach(item => {
                 const dateStr = new Date(item.created_at).toLocaleDateString('en-GB', { month: 'short', year: '2-digit' });
                 const index = labels.indexOf(dateStr);
                 if (index !== -1) { 
-                    logsCounts[index] += 1; 
-                    distCounts[index] += (item.actual_distance || 0); 
-                    errorsCounts[index] += (item.anomalies_count || 0); 
-                    timeCounts[index] += (item.flight_time || 0);
+                    dataMap.logs[index] += 1; 
+                    dataMap.distance[index] += (item.actual_distance || 0); 
+                    dataMap.errors[index] += (item.anomalies_count || 0); 
+                    dataMap.time[index] += (item.flight_time || 0);
                 }
             });
 
             chartMissions.forEach(item => {
                 const dateStr = new Date(item.created_at).toLocaleDateString('en-GB', { month: 'short', year: '2-digit' });
                 const index = labels.indexOf(dateStr);
-                if (index !== -1) missionsCounts[index] += 1;
+                if (index !== -1) dataMap.missions[index] += 1;
             });
         }
 
-        return {
-            labels,
-            datasets: [
-                {
-                    label: 'Analyzed Logs',
-                    data: logsCounts,
-                    borderColor: '#8b5cf6',
-                    backgroundColor: 'rgba(139, 92, 246, 0.1)',
-                    fill: true,
-                    tension: 0.3,
-                    yAxisID: 'y'
-                },
-                {
-                    label: 'Planned Missions',
-                    data: missionsCounts,
-                    borderColor: '#10b981',
-                    backgroundColor: 'rgba(16, 185, 129, 0.1)',
-                    fill: true,
-                    tension: 0.3,
-                    yAxisID: 'y'
-                },
-                {
-                    label: 'Critical Incidents',
-                    data: errorsCounts,
-                    borderColor: '#ef4444',
-                    backgroundColor: 'transparent',
-                    borderDash: [2, 2],
-                    tension: 0.3,
-                    type: 'line',
-                    yAxisID: 'y'
-                },
-                {
-                    label: 'Flown Distance (km)',
-                    data: distCounts.map(d => d / 1000), 
-                    borderColor: '#f59e0b',
-                    backgroundColor: 'transparent',
-                    borderDash: [5, 5],
-                    tension: 0.3,
-                    type: 'line',
-                    yAxisID: 'y1'
-                },
-                {
-                    label: 'Flight Time (hrs)',
-                    data: timeCounts.map(t => parseFloat(formatHours(t))), // Переводимо в години
-                    borderColor: '#0284c7',
-                    backgroundColor: 'transparent',
-                    borderDash: [10, 5],
-                    tension: 0.3,
-                    type: 'line',
-                    yAxisID: 'y1'
-                }
-            ]
-        };
-    }, [chartLogs, chartMissions, timeRange]);
+        // Конвертація після агрегації
+        dataMap.distance = dataMap.distance.map(d => parseFloat((d / 1000).toFixed(2)));
+        dataMap.time = dataMap.time.map(t => parseFloat(formatHours(t)));
 
-    const chartOptions = {
-        maintainAspectRatio: false,
-        responsive: true,
-        interaction: { mode: 'index', intersect: false },
-        scales: {
-            y: { 
-                type: 'linear', 
-                display: true, 
-                position: 'left', 
-                title: { display: true, text: 'Count (Logs, Missions, Errors)' }, 
-                ticks: { stepSize: 1 } 
-            },
-            y1: { 
-                // ОНОВЛЕНО: Використовуємо логарифмічну шкалу, щоб бачити і 0.3 год, і 60 км одночасно
-                type: 'logarithmic', 
-                display: true, 
-                position: 'right', 
-                title: { display: true, text: 'Distance (km) & Time (hrs) - Log Scale' }, 
-                grid: { drawOnChartArea: false },
-                ticks: {
-                    callback: function(value, index, values) {
-                        if (value === 0.1 || value === 1 || value === 10 || value === 100 || value === 1000) {
-                            return value;
-                        }
-                        return null; // Приховуємо зайві мітки логарифмічної шкали
-                    }
-                }
-            }
-        }
-    };
+        return { labels, dataMap };
+    }, [chartLogs, chartMissions, timeRange]);
 
     if (loading) return <div style={{ color: '#64748b', display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100%' }}>Calculating fleet statistics...</div>;
 
     return (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '30px' }}>
-            <header style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end' }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '30px', position: 'relative' }}>
+            <header className="pdf-block" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', background: isPdfMode ? 'white' : 'transparent', padding: isPdfMode ? '20px' : '0', borderRadius: '12px' }}>
                 <div>
                     <h1 style={{ margin: 0, fontSize: '28px', color: '#0f172a' }}>Fleet Overview</h1>
                     <p style={{ color: '#64748b', margin: '5px 0 0 0' }}>Welcome back. Here is what's happening with your drones.</p>
                 </div>
                 
-                <div style={{ display: 'flex', alignItems: 'center', gap: '10px', background: 'white', padding: '8px 12px', borderRadius: '8px', border: '1px solid #cbd5e1', boxShadow: '0 1px 2px rgba(0,0,0,0.05)' }}>
-                    <CalendarIcon size={16} color="#64748b" />
-                    <select 
-                        value={timeRange} 
-                        onChange={(e) => setTimeRange(e.target.value)}
-                        style={{ border: 'none', outline: 'none', background: 'transparent', color: '#0f172a', fontWeight: '600', fontSize: '14px', cursor: 'pointer' }}
-                    >
-                        <option value="week">Last 7 Days</option>
-                        <option value="month">Last 30 Days</option>
-                        <option value="year">This Year</option>
-                        <option value="all">All Time</option>
-                    </select>
+                <div style={{ display: 'flex', gap: '15px' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '10px', background: 'white', padding: '8px 12px', borderRadius: '8px', border: '1px solid #cbd5e1', boxShadow: '0 1px 2px rgba(0,0,0,0.05)' }}>
+                        <CalendarIcon size={16} color="#64748b" />
+                        <select 
+                            value={timeRange} 
+                            onChange={(e) => setTimeRange(e.target.value)}
+                            style={{ border: 'none', outline: 'none', background: 'transparent', color: '#0f172a', fontWeight: '600', fontSize: '14px', cursor: 'pointer' }}
+                            disabled={isExporting}
+                        >
+                            <option value="week">Last 7 Days</option>
+                            <option value="month">Last 30 Days</option>
+                            <option value="year">This Year</option>
+                            <option value="all">All Time</option>
+                        </select>
+                    </div>
+                    
+                    {!isPdfMode && (
+                        <button onClick={handleExportPDF} disabled={isExporting} style={{ background: '#3b82f6', color: 'white', border: 'none', padding: '8px 16px', borderRadius: '8px', cursor: isExporting ? 'wait' : 'pointer', fontWeight: 'bold', fontSize: '14px', display: 'flex', alignItems: 'center', gap: '8px', boxShadow: '0 1px 2px rgba(0,0,0,0.05)' }}>
+                            <Download size={16} /> {isExporting ? 'Exporting...' : 'Export PDF Report'}
+                        </button>
+                    )}
                 </div>
             </header>
 
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '20px' }}>
+            <div className="pdf-block" style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '20px' }}>
                 <StatCard icon={<Target color="#3b82f6"/>} title={profile.role === 'admin' ? "Total Fleet" : "Assigned Drones"} value={stats.dronesCount} unit="Units" onClick={() => navigate('/drones')} />
                 <StatCard icon={<MapIcon color="#10b981"/>} title="Planned Routes" value={stats.missionsCount} unit="Missions" onClick={() => navigate('/missions')} />
                 <StatCard icon={<Activity color="#8b5cf6"/>} title="Analyzed Logs" value={stats.logsCount} unit="Flights" onClick={() => navigate('/logbook')} />
                 <StatCard icon={<Navigation color="#f59e0b"/>} title="Flown Distance" value={(stats.totalActualDistance / 1000).toFixed(1)} unit="Kilometers" onClick={() => navigate('/logbook')} />
-                <StatCard icon={<Clock color="#8b5cf6"/>} title="Total Flight Time" value={formatHours(stats.totalFlightTime)} unit="Hours" onClick={() => navigate('/logbook')} />
+                <StatCard icon={<Clock color="#0284c7"/>} title="Total Flight Time" value={formatHours(stats.totalFlightTime)} unit="Hours" onClick={() => navigate('/logbook')} />
                 <StatCard icon={<AlertOctagon color="#ef4444"/>} title="Critical Incidents" value={stats.totalAnomalies} unit="Errors" onClick={() => navigate('/logbook')} borderColor="#ef4444" />
             </div>
 
-            <div style={{ display: 'flex', gap: '20px', alignItems: 'flex-start' }}>
-                <div style={{ flex: 2, display: 'flex', flexDirection: 'column', gap: '20px' }}>
-                    <div style={{ background: 'white', padding: '24px', borderRadius: '16px', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)' }}>
-                        <h3 style={{ marginTop: 0, marginBottom: '20px', display: 'flex', alignItems: 'center', gap: '10px' }}>
-                            <TrendingUp size={20} color="#3b82f6" /> Flight & Planning Activity
-                        </h3>
-                        <div style={{ height: '300px' }}>
-                            <Line data={chartData} options={chartOptions} />
-                        </div>
-                    </div>
+            <div style={{ display: 'flex', flexDirection: isPdfMode ? 'column' : 'row', gap: '20px', alignItems: 'flex-start' }}>
+                
+                {/* ЛІВА КОЛОНКА (ГРАФІКИ) */}
+                <div style={{ flex: isPdfMode ? 'none' : 2, width: '100%', display: 'flex', flexDirection: 'column' }}>
+                    
+                    <h2 className="pdf-block" style={{ margin: '0 0 15px 0', fontSize: '20px', color: '#334155' }}>Activity Charts</h2>
+                    
+                    {DASHBOARD_METRICS.map(metric => (
+                        <DashboardChart 
+                            key={metric.id}
+                            metric={metric} 
+                            labels={aggregatedData.labels} 
+                            data={aggregatedData.dataMap[metric.id]} 
+                            isPdfMode={isPdfMode}
+                        />
+                    ))}
 
-                    <div style={{ background: 'white', padding: '24px', borderRadius: '16px', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)' }}>
+                    <div className="pdf-block" style={{ background: 'white', padding: '24px', borderRadius: '16px', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)' }}>
                         <h3 style={{ marginTop: 0, marginBottom: '20px', display: 'flex', alignItems: 'center', gap: '10px' }}>
                             <Plane size={20} color="#f59e0b" /> Active Fleet Performance
                         </h3>
@@ -329,11 +432,10 @@ function Dashboard({ profile }) {
                                 {activeDrones.map(drone => (
                                     <div 
                                         key={drone.id} 
-                                        // ОНОВЛЕНО: Навігація в реєстр дронів
-                                        onClick={() => navigate(`/drones?drone=${drone.id}`)}
-                                        style={{ padding: '15px', background: '#f8fafc', border: drone.errors > 0 ? '1px solid #fca5a5' : '1px solid #e2e8f0', borderRadius: '10px', cursor: 'pointer', transition: 'border-color 0.2s' }}
-                                        onMouseOver={(e) => e.currentTarget.style.borderColor = drone.errors > 0 ? '#ef4444' : '#f59e0b'}
-                                        onMouseOut={(e) => e.currentTarget.style.borderColor = drone.errors > 0 ? '#fca5a5' : '#e2e8f0'}
+                                        onClick={() => !isPdfMode && navigate(`/drones?drone=${drone.id}`)}
+                                        style={{ padding: '15px', background: '#f8fafc', border: drone.errors > 0 ? '1px solid #fca5a5' : '1px solid #e2e8f0', borderRadius: '10px', cursor: isPdfMode ? 'default' : 'pointer', transition: 'border-color 0.2s' }}
+                                        onMouseOver={(e) => !isPdfMode && (e.currentTarget.style.borderColor = drone.errors > 0 ? '#ef4444' : '#f59e0b')}
+                                        onMouseOut={(e) => !isPdfMode && (e.currentTarget.style.borderColor = drone.errors > 0 ? '#fca5a5' : '#e2e8f0')}
                                     >
                                         <div style={{ fontWeight: 'bold', color: '#0f172a', display: 'flex', justifyContent: 'space-between' }}>
                                             {drone.name}
@@ -358,10 +460,12 @@ function Dashboard({ profile }) {
                     </div>
                 </div>
 
-                <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: '15px' }}>
-                    <div style={{ background: 'white', padding: '20px', borderRadius: '16px', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)' }}>
+                {/* ПРАВА КОЛОНКА (ІСТОРІЯ) */}
+                <div style={{ flex: isPdfMode ? 'none' : 1, width: '100%', display: 'flex', flexDirection: 'column', gap: '20px' }}>
+                    
+                    <div className="pdf-block" style={{ background: 'white', padding: '20px', borderRadius: '16px', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)' }}>
                         <div 
-                            style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', cursor: 'pointer' }}
+                            style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', cursor: 'pointer', marginBottom: isLogsOpen ? '15px' : '0' }}
                             onClick={() => setIsLogsOpen(!isLogsOpen)}
                         >
                             <h3 style={{ margin: 0, display: 'flex', alignItems: 'center', gap: '10px', fontSize: '16px' }}>
@@ -371,15 +475,15 @@ function Dashboard({ profile }) {
                         </div>
                         
                         {isLogsOpen && (
-                            <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', marginTop: '15px' }}>
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
                                 {recentLogs.length === 0 ? <p style={{ color: '#94a3b8', fontSize: '13px', margin: 0 }}>No flights recorded yet.</p> : 
                                     recentLogs.map(log => (
                                         <div 
                                             key={log.id} 
-                                            onClick={() => navigate(`/logbook?mission=${log.mission_id}`)}
-                                            style={{ padding: '12px', background: log.anomalies_count > 0 ? '#fef2f2' : '#f8fafc', borderRadius: '10px', border: log.anomalies_count > 0 ? '1px solid #fca5a5' : '1px solid #e2e8f0', cursor: 'pointer', transition: 'border-color 0.2s' }}
-                                            onMouseOver={(e) => e.currentTarget.style.borderColor = log.anomalies_count > 0 ? '#ef4444' : '#8b5cf6'}
-                                            onMouseOut={(e) => e.currentTarget.style.borderColor = log.anomalies_count > 0 ? '#fca5a5' : '#e2e8f0'}
+                                            onClick={() => !isPdfMode && navigate(`/logbook?mission=${log.mission_id}`)}
+                                            style={{ padding: '12px', background: log.anomalies_count > 0 ? '#fef2f2' : '#f8fafc', borderRadius: '10px', border: log.anomalies_count > 0 ? '1px solid #fca5a5' : '1px solid #e2e8f0', cursor: isPdfMode ? 'default' : 'pointer', transition: 'border-color 0.2s' }}
+                                            onMouseOver={(e) => !isPdfMode && (e.currentTarget.style.borderColor = log.anomalies_count > 0 ? '#ef4444' : '#8b5cf6')}
+                                            onMouseOut={(e) => !isPdfMode && (e.currentTarget.style.borderColor = log.anomalies_count > 0 ? '#fca5a5' : '#e2e8f0')}
                                         >
                                             <div style={{ fontWeight: 'bold', fontSize: '13px', color: log.anomalies_count > 0 ? '#b91c1c' : '#0f172a', display: 'flex', justifyContent: 'space-between' }}>
                                                 {log.name || 'Unnamed Analysis'}
@@ -396,9 +500,9 @@ function Dashboard({ profile }) {
                         )}
                     </div>
 
-                    <div style={{ background: 'white', padding: '20px', borderRadius: '16px', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)' }}>
+                    <div className="pdf-block" style={{ background: 'white', padding: '20px', borderRadius: '16px', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)' }}>
                         <div 
-                            style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', cursor: 'pointer' }}
+                            style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', cursor: 'pointer', marginBottom: isMissionsOpen ? '15px' : '0' }}
                             onClick={() => setIsMissionsOpen(!isMissionsOpen)}
                         >
                             <h3 style={{ margin: 0, display: 'flex', alignItems: 'center', gap: '10px', fontSize: '16px' }}>
@@ -408,15 +512,15 @@ function Dashboard({ profile }) {
                         </div>
                         
                         {isMissionsOpen && (
-                            <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', marginTop: '15px' }}>
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
                                 {recentMissions.length === 0 ? <p style={{ color: '#94a3b8', fontSize: '13px', margin: 0 }}>No missions planned yet.</p> : 
                                     recentMissions.map(mission => (
                                         <div 
                                             key={mission.id} 
-                                            onClick={() => navigate(`/missions?loadMissionId=${mission.id}`)}
-                                            style={{ padding: '12px', background: '#f8fafc', borderRadius: '10px', border: '1px solid #e2e8f0', cursor: 'pointer', transition: 'border-color 0.2s' }}
-                                            onMouseOver={(e) => e.currentTarget.style.borderColor = '#10b981'}
-                                            onMouseOut={(e) => e.currentTarget.style.borderColor = '#e2e8f0'}
+                                            onClick={() => !isPdfMode && navigate(`/missions?loadMissionId=${mission.id}`)}
+                                            style={{ padding: '12px', background: '#f8fafc', borderRadius: '10px', border: '1px solid #e2e8f0', cursor: isPdfMode ? 'default' : 'pointer', transition: 'border-color 0.2s' }}
+                                            onMouseOver={(e) => !isPdfMode && (e.currentTarget.style.borderColor = '#10b981')}
+                                            onMouseOut={(e) => !isPdfMode && (e.currentTarget.style.borderColor = '#e2e8f0')}
                                         >
                                             <div style={{ fontWeight: 'bold', fontSize: '13px', color: '#0f172a' }}>{mission.name}</div>
                                             <div style={{ fontSize: '11px', color: '#64748b', display: 'flex', justifyContent: 'space-between', marginTop: '4px' }}>

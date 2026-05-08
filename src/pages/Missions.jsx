@@ -1,7 +1,6 @@
 import { useState, useMemo, useEffect, useCallback, useRef } from 'react';
 import { MapContainer, TileLayer, Marker, Popup, useMapEvents, Polyline, GeoJSON, useMap } from 'react-leaflet';
 import L from 'leaflet';
-// ОНОВЛЕНО: Додано імпорт іконки Clock
 import { Trash2, RotateCw, Database, FolderOpen, Download, AlertTriangle, Undo2, XCircle, Archive, ArchiveRestore, Calendar, Activity, ShieldAlert, Edit3, Clock } from 'lucide-react';
 import { supabase } from '../supabaseClient';
 import { useLocation, useNavigate } from 'react-router-dom';
@@ -157,7 +156,8 @@ function Missions({ profile }) {
     }, [savedMissions, loadMissionId, navigate]);
 
     const fetchMissions = async () => {
-        const { data, error } = await supabase.from('missions').select('*, drones(name), flight_logs(id)').order('created_at', { ascending: false });
+        // ОНОВЛЕНО: Підтягуємо max_speed з таблиці дронів
+        const { data, error } = await supabase.from('missions').select('*, drones(name, model, max_flight_time, max_speed), flight_logs(id)').order('created_at', { ascending: false });
         if (!error) setSavedMissions(data);
     };
 
@@ -204,20 +204,18 @@ function Missions({ profile }) {
         if (!error) fetchMissions();
     };
 
-    // ОНОВЛЕНО: Розрахунок дистанції ТА ЧАСУ
     const { totalDistance, estimatedTime } = useMemo(() => {
         let dist = 0; 
         let time = 0;
         for (let i = 0; i < waypoints.length - 1; i++) {
             const d = L.latLng(waypoints[i].lat, waypoints[i].lng).distanceTo(L.latLng(waypoints[i + 1].lat, waypoints[i + 1].lng));
             dist += d;
-            const speed = waypoints[i].speed > 0 ? waypoints[i].speed : 5; // Захист від ділення на нуль
+            const speed = waypoints[i].speed > 0 ? waypoints[i].speed : 5; 
             time += d / speed;
         }
         return { totalDistance: dist, estimatedTime: time };
     }, [waypoints]);
 
-    // ФУНКЦІЯ ФОРМАТУВАННЯ ЧАСУ
     const formatTime = (seconds) => {
         if (!seconds) return "0s";
         const m = Math.floor(seconds / 60); 
@@ -258,7 +256,7 @@ function Missions({ profile }) {
         return mids;
     }, [waypoints]);
 
-    function MapEvents() { useMapEvents({ click(e) { setEditingPoint({ lat: e.latlng.lat, lng: e.latlng.lng, alt: 50, speed: 5, name: "", isNew: true }); } }); return null; }
+    function MapEvents() { useMapEvents({ click(e) { setEditingPoint({ lat: e.latlng.lat, lng: e.latlng.lng, alt: 50, speed: 10, name: "", isNew: true }); } }); return null; }
 
     const handleMarkerDragStart = () => { setHistory(prev => [...prev, waypoints]); setEditingPoint(null); };
     const handleMarkerDrag = (e, id) => { const position = e.target.getLatLng(); setWaypoints(prev => prev.map(wp => wp.id === id ? { ...wp, lat: position.lat, lng: position.lng } : wp)); };
@@ -269,10 +267,30 @@ function Missions({ profile }) {
 
     const saveMissionFile = () => {
         let fileContent = "QGC WPL 110\n";
-        fileContent += `0\t1\t0\t16\t0\t0\t0\t0\t${waypoints[0].lat}\t${waypoints[0].lng}\t0\t1\n`;
-        waypoints.forEach((wp, index) => { fileContent += `${index + 1}\t0\t3\t16\t0.0\t0.0\t0.0\t0.0\t${wp.lat.toFixed(6)}\t${wp.lng.toFixed(6)}\t${wp.alt}.0\t1\n`; });
+        
+        fileContent += `0\t1\t0\t16\t0\t0\t0\t0\t${waypoints[0].lat.toFixed(6)}\t${waypoints[0].lng.toFixed(6)}\t0.000000\t1\n`;
+        
+        let seqIndex = 1;
+        let currentSpeed = -1;
+
+        waypoints.forEach((wp) => { 
+            if (wp.speed !== currentSpeed) {
+                fileContent += `${seqIndex}\t0\t3\t178\t1.0\t${wp.speed.toFixed(1)}\t-1.0\t0.0\t0.0\t0.0\t0.0\t1\n`;
+                seqIndex++;
+                currentSpeed = wp.speed;
+            }
+            
+            fileContent += `${seqIndex}\t0\t3\t16\t0.0\t0.0\t0.0\t0.0\t${wp.lat.toFixed(6)}\t${wp.lng.toFixed(6)}\t${wp.alt.toFixed(1)}\t1\n`; 
+            seqIndex++;
+        });
+
+        fileContent += `${seqIndex}\t0\t3\t20\t0.0\t0.0\t0.0\t0.0\t0.0\t0.0\t0.0\t1\n`;
+
         const blob = new Blob([fileContent], { type: 'text/plain' });
-        const link = document.createElement('a'); link.href = URL.createObjectURL(blob); link.download = `${missionName || 'mission'}.waypoints`; link.click();
+        const link = document.createElement('a'); 
+        link.href = URL.createObjectURL(blob); 
+        link.download = `${missionName || 'mission'}.waypoints`; 
+        link.click();
     };
 
     let displayedMissions = savedMissions.filter(m => activeTab === 'archived' ? m.is_archived : !m.is_archived);
@@ -359,7 +377,6 @@ function Missions({ profile }) {
                     </div>
                 ) : ( <div style={{ textAlign: 'center', padding: '15px', background: '#f8fafc', borderRadius: '10px', border: '1px dashed #cbd5e1', marginBottom: '20px' }}><p style={{ color: '#64748b', margin: 0, fontSize: '14px' }}>Click map to add waypoints</p></div> )}
 
-                {/* ОНОВЛЕНО: Відображаємо дистанцію та ЧАС */}
                 <div style={{ background: '#f1f5f9', padding: '15px', borderRadius: '10px', marginBottom: '20px' }}>
                     <div style={{ fontSize: '12px', color: '#64748b', fontWeight: 'bold' }}>TOTAL DISTANCE & ESTIMATED TIME</div>
                     <div style={{ fontSize: '18px', fontWeight: '800', color: '#1e293b' }}>
