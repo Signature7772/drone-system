@@ -64,7 +64,6 @@ const DashboardChart = ({ metric, labels, data, isPdfMode }) => {
         }
     };
 
-    // Не малюємо графік, якщо всі дані нульові (щоб не засмічувати інтерфейс)
     const totalSum = data.reduce((acc, val) => acc + val, 0);
     if (totalSum === 0 && !isPdfMode) return null; 
 
@@ -125,12 +124,7 @@ function Dashboard({ profile }) {
     const [timeRange, setTimeRange] = useState('week'); 
     
     const [stats, setStats] = useState({
-        dronesCount: 0,
-        missionsCount: 0,
-        logsCount: 0,
-        totalActualDistance: 0,
-        totalFlightTime: 0,
-        totalAnomalies: 0
+        dronesCount: 0, missionsCount: 0, logsCount: 0, totalActualDistance: 0, totalFlightTime: 0, totalAnomalies: 0
     });
     
     const [chartLogs, setChartLogs] = useState([]); 
@@ -145,6 +139,12 @@ function Dashboard({ profile }) {
 
     const [isExporting, setIsExporting] = useState(false);
     const [isPdfMode, setIsPdfMode] = useState(false);
+
+    // === НОВІ СТЕЙТИ ТА РЕФИ ДЛЯ КЛІКАБЕЛЬНИХ ТОПІВ ===
+    const activeFleetRef = useRef(null);
+    const recentAnalysisRef = useRef(null);
+    const [highlightedDroneId, setHighlightedDroneId] = useState(null);
+    const [highlightedLogId, setHighlightedLogId] = useState(null);
 
     useEffect(() => {
         if (profile?.company_id) {
@@ -245,6 +245,34 @@ function Dashboard({ profile }) {
         return (seconds / 3600).toFixed(2);
     };
 
+    // === ОБРОБНИКИ КЛІКІВ ДЛЯ ТОПІВ ===
+    const handleTopDroneClick = () => {
+        if (activeDrones.length > 0 && !isPdfMode) {
+            activeFleetRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            setHighlightedDroneId(activeDrones[0].id);
+            setTimeout(() => setHighlightedDroneId(null), 3000); // Зняти підсвітку через 3 сек
+        }
+    };
+
+    const handleCriticalLogClick = () => {
+        if (!isPdfMode) {
+            const worstFlight = [...chartLogs].sort((a,b) => b.anomalies_count - a.anomalies_count)[0];
+            if (worstFlight && worstFlight.anomalies_count > 0) {
+                // Якщо цього логу немає в 5 останніх, додаємо його тимчасово наверх, щоб юзер побачив
+                if (!recentLogs.find(l => l.id === worstFlight.id)) {
+                    setRecentLogs(prev => [worstFlight, ...prev].slice(0, 6));
+                }
+                
+                setIsLogsOpen(true); // Розгортаємо акордеон, якщо він закритий
+                setTimeout(() => {
+                    recentAnalysisRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                    setHighlightedLogId(worstFlight.id);
+                    setTimeout(() => setHighlightedLogId(null), 3000);
+                }, 100);
+            }
+        }
+    };
+
     const handleExportPDF = async (e) => {
         e.stopPropagation();
         setIsExporting(true); 
@@ -297,7 +325,6 @@ function Dashboard({ profile }) {
         }, 100);
     };
 
-    // === ФОРМУВАННЯ АГРЕГОВАНИХ ДАНИХ ДЛЯ КОЖНОЇ МЕТРИКИ ===
     const aggregatedData = useMemo(() => {
         const labels = [];
         const dataMap = { logs: [], missions: [], distance: [], errors: [], time: [] };
@@ -354,7 +381,6 @@ function Dashboard({ profile }) {
             });
         }
 
-        // Конвертація після агрегації
         dataMap.distance = dataMap.distance.map(d => parseFloat((d / 1000).toFixed(2)));
         dataMap.time = dataMap.time.map(t => parseFloat(formatHours(t)));
 
@@ -404,6 +430,57 @@ function Dashboard({ profile }) {
                 <StatCard icon={<AlertOctagon color="#ef4444"/>} title="Critical Incidents" value={stats.totalAnomalies} unit="Errors" onClick={() => navigate('/logbook')} borderColor="#ef4444" />
             </div>
 
+            {/* === БЛОК ТОПІВ З КЛІКАБЕЛЬНІСТЮ === */}
+            <div className="pdf-block" style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))', gap: '20px' }}>
+                {/* Топ Дрон */}
+                <div 
+                    onClick={handleTopDroneClick}
+                    style={{ background: 'white', padding: '20px', borderRadius: '16px', borderLeft: '4px solid #10b981', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)', cursor: activeDrones.length > 0 && !isPdfMode ? 'pointer' : 'default', transition: 'transform 0.2s', ...(!isPdfMode && activeDrones.length > 0 && { ':hover': { transform: 'translateY(-2px)' } }) }}
+                >
+                    <h3 style={{ margin: '0 0 10px 0', fontSize: '15px', color: '#64748b', display: 'flex', alignItems: 'center', gap: '8px', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+                        <TrendingUp size={16} color="#10b981"/> Top Performing Drone
+                    </h3>
+                    {activeDrones.length > 0 ? (
+                        <div>
+                            <div style={{ fontSize: '22px', fontWeight: 'bold', color: '#0f172a' }}>{activeDrones[0].name}</div>
+                            <div style={{ fontSize: '14px', color: '#64748b', marginTop: '4px' }}>
+                                Leader of the period with <strong style={{color: '#0f172a'}}>{(activeDrones[0].flownDist / 1000).toFixed(1)} km</strong> flown across <strong style={{color: '#0f172a'}}>{activeDrones[0].logsCount}</strong> missions.
+                            </div>
+                        </div>
+                    ) : (
+                        <span style={{ color: '#94a3b8', fontSize: '14px' }}>No flight activity in this period.</span>
+                    )}
+                </div>
+
+                {/* Найбільша проблема */}
+                <div 
+                    onClick={handleCriticalLogClick}
+                    style={{ background: 'white', padding: '20px', borderRadius: '16px', borderLeft: '4px solid #ef4444', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)', cursor: chartLogs.some(log => log.anomalies_count > 0) && !isPdfMode ? 'pointer' : 'default', transition: 'transform 0.2s' }}
+                >
+                    <h3 style={{ margin: '0 0 10px 0', fontSize: '15px', color: '#64748b', display: 'flex', alignItems: 'center', gap: '8px', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+                        <AlertOctagon size={16} color="#ef4444"/> Critical Attention Required
+                    </h3>
+                    {chartLogs.some(log => log.anomalies_count > 0) ? (
+                        (() => {
+                            const worstFlight = [...chartLogs].sort((a,b) => b.anomalies_count - a.anomalies_count)[0];
+                            return (
+                                <div>
+                                    <div style={{ fontSize: '22px', fontWeight: 'bold', color: '#0f172a' }}>{worstFlight.name || 'Unnamed Flight'}</div>
+                                    <div style={{ fontSize: '14px', color: '#64748b', marginTop: '4px' }}>
+                                        Recorded <strong style={{color: '#ef4444'}}>{worstFlight.anomalies_count} critical anomalies</strong>. Recommended hardware inspection.
+                                    </div>
+                                </div>
+                            );
+                        })()
+                    ) : (
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: '#10b981', fontWeight: '500', height: '100%' }}>
+                            <span>Fleet is 100% healthy. No anomalies detected!</span>
+                        </div>
+                    )}
+                </div>
+            </div>
+            {/* === КІНЕЦЬ БЛОКУ ТОПІВ === */}
+
             <div style={{ display: 'flex', flexDirection: isPdfMode ? 'column' : 'row', gap: '20px', alignItems: 'flex-start' }}>
                 
                 {/* ЛІВА КОЛОНКА (ГРАФІКИ) */}
@@ -421,7 +498,8 @@ function Dashboard({ profile }) {
                         />
                     ))}
 
-                    <div className="pdf-block" style={{ background: 'white', padding: '24px', borderRadius: '16px', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)' }}>
+                    {/* БЛОК АВТОПАРКУ (З REF ТА ПІДСВІТКОЮ) */}
+                    <div ref={activeFleetRef} className="pdf-block" style={{ background: 'white', padding: '24px', borderRadius: '16px', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)' }}>
                         <h3 style={{ marginTop: 0, marginBottom: '20px', display: 'flex', alignItems: 'center', gap: '10px' }}>
                             <Plane size={20} color="#f59e0b" /> Active Fleet Performance
                         </h3>
@@ -433,9 +511,19 @@ function Dashboard({ profile }) {
                                     <div 
                                         key={drone.id} 
                                         onClick={() => !isPdfMode && navigate(`/drones?drone=${drone.id}`)}
-                                        style={{ padding: '15px', background: '#f8fafc', border: drone.errors > 0 ? '1px solid #fca5a5' : '1px solid #e2e8f0', borderRadius: '10px', cursor: isPdfMode ? 'default' : 'pointer', transition: 'border-color 0.2s' }}
-                                        onMouseOver={(e) => !isPdfMode && (e.currentTarget.style.borderColor = drone.errors > 0 ? '#ef4444' : '#f59e0b')}
-                                        onMouseOut={(e) => !isPdfMode && (e.currentTarget.style.borderColor = drone.errors > 0 ? '#fca5a5' : '#e2e8f0')}
+                                        style={{ 
+                                            padding: '15px', 
+                                            background: highlightedDroneId === drone.id ? '#ecfdf5' : '#f8fafc', // Зелений фон при підсвітці
+                                            border: drone.errors > 0 ? '1px solid #fca5a5' : '1px solid #e2e8f0', 
+                                            borderRadius: '10px', 
+                                            cursor: isPdfMode ? 'default' : 'pointer', 
+                                            transition: 'all 0.3s ease',
+                                            transform: highlightedDroneId === drone.id ? 'scale(1.02)' : 'scale(1)', // Збільшення при підсвітці
+                                            boxShadow: highlightedDroneId === drone.id ? '0 0 0 3px #34d399' : 'none', // Зелене світіння
+                                            zIndex: highlightedDroneId === drone.id ? 10 : 1
+                                        }}
+                                        onMouseOver={(e) => !isPdfMode && highlightedDroneId !== drone.id && (e.currentTarget.style.borderColor = drone.errors > 0 ? '#ef4444' : '#f59e0b')}
+                                        onMouseOut={(e) => !isPdfMode && highlightedDroneId !== drone.id && (e.currentTarget.style.borderColor = drone.errors > 0 ? '#fca5a5' : '#e2e8f0')}
                                     >
                                         <div style={{ fontWeight: 'bold', color: '#0f172a', display: 'flex', justifyContent: 'space-between' }}>
                                             {drone.name}
@@ -460,10 +548,10 @@ function Dashboard({ profile }) {
                     </div>
                 </div>
 
-                {/* ПРАВА КОЛОНКА (ІСТОРІЯ) */}
+                {/* ПРАВА КОЛОНКА (ІСТОРІЯ З REF ТА ПІДСВІТКОЮ) */}
                 <div style={{ flex: isPdfMode ? 'none' : 1, width: '100%', display: 'flex', flexDirection: 'column', gap: '20px' }}>
                     
-                    <div className="pdf-block" style={{ background: 'white', padding: '20px', borderRadius: '16px', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)' }}>
+                    <div ref={recentAnalysisRef} className="pdf-block" style={{ background: 'white', padding: '20px', borderRadius: '16px', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)' }}>
                         <div 
                             style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', cursor: 'pointer', marginBottom: isLogsOpen ? '15px' : '0' }}
                             onClick={() => setIsLogsOpen(!isLogsOpen)}
@@ -481,9 +569,19 @@ function Dashboard({ profile }) {
                                         <div 
                                             key={log.id} 
                                             onClick={() => !isPdfMode && navigate(`/logbook?mission=${log.mission_id}`)}
-                                            style={{ padding: '12px', background: log.anomalies_count > 0 ? '#fef2f2' : '#f8fafc', borderRadius: '10px', border: log.anomalies_count > 0 ? '1px solid #fca5a5' : '1px solid #e2e8f0', cursor: isPdfMode ? 'default' : 'pointer', transition: 'border-color 0.2s' }}
-                                            onMouseOver={(e) => !isPdfMode && (e.currentTarget.style.borderColor = log.anomalies_count > 0 ? '#ef4444' : '#8b5cf6')}
-                                            onMouseOut={(e) => !isPdfMode && (e.currentTarget.style.borderColor = log.anomalies_count > 0 ? '#fca5a5' : '#e2e8f0')}
+                                            style={{ 
+                                                padding: '12px', 
+                                                background: highlightedLogId === log.id ? '#fef2f2' : (log.anomalies_count > 0 ? '#fef2f2' : '#f8fafc'), 
+                                                borderRadius: '10px', 
+                                                border: log.anomalies_count > 0 ? '1px solid #fca5a5' : '1px solid #e2e8f0', 
+                                                cursor: isPdfMode ? 'default' : 'pointer', 
+                                                transition: 'all 0.3s ease',
+                                                transform: highlightedLogId === log.id ? 'scale(1.02)' : 'scale(1)', // Збільшення при підсвітці
+                                                boxShadow: highlightedLogId === log.id ? '0 0 0 3px #f87171' : 'none', // Червоне світіння
+                                                zIndex: highlightedLogId === log.id ? 10 : 1
+                                            }}
+                                            onMouseOver={(e) => !isPdfMode && highlightedLogId !== log.id && (e.currentTarget.style.borderColor = log.anomalies_count > 0 ? '#ef4444' : '#8b5cf6')}
+                                            onMouseOut={(e) => !isPdfMode && highlightedLogId !== log.id && (e.currentTarget.style.borderColor = log.anomalies_count > 0 ? '#fca5a5' : '#e2e8f0')}
                                         >
                                             <div style={{ fontWeight: 'bold', fontSize: '13px', color: log.anomalies_count > 0 ? '#b91c1c' : '#0f172a', display: 'flex', justifyContent: 'space-between' }}>
                                                 {log.name || 'Unnamed Analysis'}

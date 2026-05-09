@@ -161,10 +161,26 @@ function Drones({ profile }) {
 
         const hasAccess = accessMap[droneId]?.includes(userId);
         if (hasAccess) {
-            await supabase.from('drone_access').delete().match({ drone_id: droneId, user_id: userId });
+            // Забираємо доступ
+            const { error } = await supabase
+                .from('drone_access')
+                .delete()
+                .match({ drone_id: droneId, user_id: userId });
+                
+            if (error) alert("Error removing access: " + error.message);
         } else {
-            await supabase.from('drone_access').insert([{ drone_id: droneId, user_id: userId }]);
+            // Надаємо доступ (ДОДАНО company_id)
+            const { error } = await supabase
+                .from('drone_access')
+                .insert([{ 
+                    drone_id: droneId, 
+                    user_id: userId,
+                    company_id: profile.company_id // <--- Саме цього рядка не вистачало!
+                }]);
+                
+            if (error) alert("Error granting access: " + error.message);
         }
+        // Оновлюємо дані на екрані
         fetchDronesAndAccess();
     };
 

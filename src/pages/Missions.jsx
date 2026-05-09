@@ -1,7 +1,7 @@
 import { useState, useMemo, useEffect, useCallback, useRef } from 'react';
-import { MapContainer, TileLayer, Marker, Popup, useMapEvents, Polyline, GeoJSON, useMap } from 'react-leaflet';
+import { MapContainer, TileLayer, Marker, Popup, useMapEvents, Polyline, GeoJSON, useMap, LayersControl } from 'react-leaflet';
 import L from 'leaflet';
-import { Trash2, RotateCw, Database, FolderOpen, Download, AlertTriangle, Undo2, XCircle, Archive, ArchiveRestore, Calendar, Activity, ShieldAlert, Edit3, Clock } from 'lucide-react';
+import { Trash2, RotateCw, Database, FolderOpen, Download, AlertTriangle, Undo2, XCircle, Archive, ArchiveRestore, Calendar, Activity, ShieldAlert, Edit3, Clock, CloudRain, Wind, Cloud, Thermometer } from 'lucide-react';
 import { supabase } from '../supabaseClient';
 import { useLocation, useNavigate } from 'react-router-dom';
 
@@ -25,6 +25,45 @@ function isPointInsidePolygon(point, polygon) {
     return inside;
 }
 
+// Безкоштовний погодний радар
+function LiveRadarLayer() {
+    const [radarUrl, setRadarUrl] = useState(null);
+    useEffect(() => {
+        fetch('https://api.rainviewer.com/public/weather-maps.json')
+            .then(res => res.json())
+            .then(data => {
+                if (data && data.radar && data.radar.past && data.radar.past.length > 0) {
+                    const latest = data.radar.past[data.radar.past.length - 1];
+                    // Використовуємо 512 для кращої якості на ретині (опційно)
+                    setRadarUrl(`https://tilecache.rainviewer.com${latest.path}/256/{z}/{x}/{y}/2/1_1.png`);
+                }
+            }).catch(e => console.error('Radar fetch failed', e));
+    }, []);
+
+    if (!radarUrl) return null;
+
+    return (
+        <TileLayer 
+            url={radarUrl} 
+            opacity={0.6} 
+            zIndex={10} 
+            // КЛЮЧОВІ ПАРАМЕТРИ:
+            maxNativeZoom={7} // Більшість радарів RainViewer стабільні до 10-11 зуму
+            maxZoom={22}       // Дозволяє карті зумитись далі, розтягуючи шар
+            attribution="Weather data by RainViewer" 
+        />
+    );
+}
+
+function MapTracker({ setMapCenter }) {
+    useMapEvents({
+        moveend: (e) => {
+            setMapCenter([e.target.getCenter().lat, e.target.getCenter().lng]);
+        }
+    });
+    return null;
+}
+
 function NFZManager({ setDynamicNfz, setIsLoadingNfz }) {
     const map = useMap();
     const timeoutRef = useRef(null);
@@ -46,39 +85,25 @@ function NFZManager({ setDynamicNfz, setIsLoadingNfz }) {
         `;
 
         try {
-            const response = await fetch('https://overpass-api.de/api/interpreter', {
-                method: 'POST',
-                body: query
-            });
+            const response = await fetch('https://overpass-api.de/api/interpreter', { method: 'POST', body: query });
             const data = await response.json();
             
             const features = data.elements.map(el => {
                 if (el.type === 'way' && el.geometry && el.geometry.length > 2) {
                     const coords = el.geometry.map(g => [g.lon, g.lat]);
-                    if (coords[0][0] !== coords[coords.length - 1][0] || coords[0][1] !== coords[coords.length - 1][1]) {
-                        coords.push(coords[0]);
-                    }
+                    if (coords[0][0] !== coords[coords.length - 1][0] || coords[0][1] !== coords[coords.length - 1][1]) { coords.push(coords[0]); }
                     
                     let rawType = el.tags?.name || el.tags?.military || el.tags?.aeroway || el.tags?.amenity || el.tags?.power;
-                    if (!rawType || rawType === "yes") {
-                        return null;
-                    }
+                    if (!rawType || rawType === "yes") return null;
 
                     let typeName = rawType.charAt(0).toUpperCase() + rawType.slice(1);
-
-                    return {
-                        type: "Feature",
-                        properties: { name: `NFZ: ${typeName}`, color: "#ef4444" },
-                        geometry: { type: "Polygon", coordinates: [coords] }
-                    };
+                    return { type: "Feature", properties: { name: `NFZ: ${typeName}`, color: "#ef4444" }, geometry: { type: "Polygon", coordinates: [coords] } };
                 }
                 return null;
             }).filter(Boolean); 
 
             setDynamicNfz({ type: "FeatureCollection", features });
-        } catch (error) {
-            console.error("Failed to fetch NFZ from OpenStreetMap:", error);
-        }
+        } catch (error) { console.error("Failed to fetch NFZ from OpenStreetMap:", error); }
         setIsLoadingNfz(false);
     };
 
@@ -90,7 +115,6 @@ function NFZManager({ setDynamicNfz, setIsLoadingNfz }) {
             timeoutRef.current = setTimeout(fetchZones, 1500);
         }
     });
-
     return null;
 }
 
@@ -106,6 +130,11 @@ function Missions({ profile }) {
 
     const [dynamicNfz, setDynamicNfz] = useState({ type: "FeatureCollection", features: [] });
     const [isLoadingNfz, setIsLoadingNfz] = useState(false);
+    
+    const [mapCenter, setMapCenter] = useState([51.5300, 31.3100]);
+    const [weatherAlert, setWeatherAlert] = useState(null);
+    const [showWeatherOverlay, setShowWeatherOverlay] = useState(false);
+    const [currentWeather, setCurrentWeather] = useState(null);
 
     const location = useLocation();
     const navigate = useNavigate();
@@ -114,6 +143,42 @@ function Missions({ profile }) {
     const filterDroneId = searchParams.get('drone');
     const isArchivedView = searchParams.get('tab') === 'archived';
     const [activeTab, setActiveTab] = useState(isArchivedView ? 'archived' : 'active');
+
+    useEffect(() => {
+        const checkWeather = async () => {
+            const lat = waypoints.length > 0 ? waypoints[0].lat : mapCenter[0];
+            const lng = waypoints.length > 0 ? waypoints[0].lng : mapCenter[1];
+
+            try {
+                const res = await fetch(`https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lng}&current=temperature_2m,wind_speed_10m,wind_gusts_10m,precipitation&hourly=wind_speed_10m,precipitation_probability&wind_speed_unit=ms`);
+                const data = await res.json();
+                setCurrentWeather(data.current);
+
+                if (waypoints.length > 0 && selectedDroneId) {
+                    const drone = drones.find(d => String(d.id) === String(selectedDroneId));
+                    const safeWindLimit = drone && drone.max_speed ? (drone.max_speed * 0.6) : 10; 
+
+                    const currentWind = data.current.wind_speed_10m;
+                    const currentPrecip = data.current.precipitation;
+
+                    if (currentWind > safeWindLimit || currentPrecip > 0) {
+                        const goodHourIdx = data.hourly.wind_speed_10m.findIndex((w, i) => w <= safeWindLimit && data.hourly.precipitation_probability[i] < 10);
+                        let improvementText = goodHourIdx !== -1 
+                            ? `Conditions improve around ${new Date(data.hourly.time[goodHourIdx]).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}.`
+                            : `No improvement expected in next 24h.`;
+
+                        setWeatherAlert({
+                            wind: currentWind, rain: currentPrecip > 0,
+                            message: `Warning: Weather is currently unsafe for ${drone?.name || 'this drone'}. ${currentPrecip > 0 ? 'Precipitation detected.' : `Wind speed is ${currentWind} m/s (Safe limit: ${safeWindLimit.toFixed(1)} m/s).`} ${improvementText}`
+                        });
+                    } else { setWeatherAlert(null); }
+                } else { setWeatherAlert(null); }
+            } catch (err) { console.error("Failed to fetch weather data", err); }
+        };
+
+        const timer = setTimeout(checkWeather, 1500); 
+        return () => clearTimeout(timer);
+    }, [waypoints.length > 0 ? waypoints[0] : null, mapCenter, selectedDroneId, drones]);
 
     const updateWaypointsWithHistory = useCallback((newWaypoints) => {
         setHistory(prev => {
@@ -140,10 +205,7 @@ function Missions({ profile }) {
     }, [handleUndo]);
 
     useEffect(() => { 
-        if (profile?.company_id) {
-            fetchMissions(); 
-            fetchDrones(); 
-        }
+        if (profile?.company_id) { fetchMissions(); fetchDrones(); }
     }, [profile]);
 
     useEffect(() => { if (filterDroneId) setSelectedDroneId(filterDroneId); }, [filterDroneId]);
@@ -156,13 +218,12 @@ function Missions({ profile }) {
     }, [savedMissions, loadMissionId, navigate]);
 
     const fetchMissions = async () => {
-        // ОНОВЛЕНО: Підтягуємо max_speed з таблиці дронів
         const { data, error } = await supabase.from('missions').select('*, drones(name, model, max_flight_time, max_speed), flight_logs(id)').order('created_at', { ascending: false });
         if (!error) setSavedMissions(data);
     };
 
     const fetchDrones = async () => {
-        const { data: allDrones } = await supabase.from('drones').select('id, name, model').order('name', { ascending: true });
+        const { data: allDrones } = await supabase.from('drones').select('id, name, model, max_speed').order('name', { ascending: true });
         if (profile.role === 'admin') {
             setDrones(allDrones || []);
         } else {
@@ -205,8 +266,7 @@ function Missions({ profile }) {
     };
 
     const { totalDistance, estimatedTime } = useMemo(() => {
-        let dist = 0; 
-        let time = 0;
+        let dist = 0; let time = 0;
         for (let i = 0; i < waypoints.length - 1; i++) {
             const d = L.latLng(waypoints[i].lat, waypoints[i].lng).distanceTo(L.latLng(waypoints[i + 1].lat, waypoints[i + 1].lng));
             dist += d;
@@ -218,28 +278,19 @@ function Missions({ profile }) {
 
     const formatTime = (seconds) => {
         if (!seconds) return "0s";
-        const m = Math.floor(seconds / 60); 
-        const s = Math.round(seconds % 60);
+        const m = Math.floor(seconds / 60); const s = Math.round(seconds % 60);
         return `${m > 0 ? m + 'm ' : ''}${s}s`;
     };
 
     const hasViolation = useMemo(() => {
         if (waypoints.length === 0 || !dynamicNfz.features) return false;
-        
         for (let feature of dynamicNfz.features) {
             const polygonCoords = feature.geometry.coordinates[0]; 
-            
-            for (let wp of waypoints) { 
-                if (isPointInsidePolygon([wp.lng, wp.lat], polygonCoords)) return true; 
-            }
-            
+            for (let wp of waypoints) { if (isPointInsidePolygon([wp.lng, wp.lat], polygonCoords)) return true; }
             for (let i = 0; i < waypoints.length - 1; i++) {
-                let A = [waypoints[i].lng, waypoints[i].lat];
-                let B = [waypoints[i+1].lng, waypoints[i+1].lat];
-                
+                let A = [waypoints[i].lng, waypoints[i].lat]; let B = [waypoints[i+1].lng, waypoints[i+1].lat];
                 for (let j = 0; j < polygonCoords.length - 1; j++) {
-                    let C = polygonCoords[j];
-                    let D = polygonCoords[j + 1];
+                    let C = polygonCoords[j]; let D = polygonCoords[j + 1];
                     if (doIntersect(A, B, C, D)) return true;
                 }
             }
@@ -267,25 +318,17 @@ function Missions({ profile }) {
 
     const saveMissionFile = () => {
         let fileContent = "QGC WPL 110\n";
-        
         fileContent += `0\t1\t0\t16\t0\t0\t0\t0\t${waypoints[0].lat.toFixed(6)}\t${waypoints[0].lng.toFixed(6)}\t0.000000\t1\n`;
-        
-        let seqIndex = 1;
-        let currentSpeed = -1;
-
+        let seqIndex = 1; let currentSpeed = -1;
         waypoints.forEach((wp) => { 
             if (wp.speed !== currentSpeed) {
                 fileContent += `${seqIndex}\t0\t3\t178\t1.0\t${wp.speed.toFixed(1)}\t-1.0\t0.0\t0.0\t0.0\t0.0\t1\n`;
-                seqIndex++;
-                currentSpeed = wp.speed;
+                seqIndex++; currentSpeed = wp.speed;
             }
-            
             fileContent += `${seqIndex}\t0\t3\t16\t0.0\t0.0\t0.0\t0.0\t${wp.lat.toFixed(6)}\t${wp.lng.toFixed(6)}\t${wp.alt.toFixed(1)}\t1\n`; 
             seqIndex++;
         });
-
         fileContent += `${seqIndex}\t0\t3\t20\t0.0\t0.0\t0.0\t0.0\t0.0\t0.0\t0.0\t1\n`;
-
         const blob = new Blob([fileContent], { type: 'text/plain' });
         const link = document.createElement('a'); 
         link.href = URL.createObjectURL(blob); 
@@ -327,18 +370,63 @@ function Missions({ profile }) {
                         <AlertTriangle size={20} /> Route Violation: The flight path intersects a Restricted Zone. Please adjust the route.
                     </div>
                 )}
+                
+                {weatherAlert && (
+                    <div style={{ background: '#eff6ff', border: '1px solid #3b82f6', color: '#1e40af', padding: '10px', borderRadius: '8px', marginBottom: '10px', display: 'flex', alignItems: 'center', gap: '10px', fontWeight: '500' }}>
+                        {weatherAlert.rain ? <CloudRain size={20} /> : <Wind size={20} />}
+                        {weatherAlert.message}
+                    </div>
+                )}
 
                 <div style={{ flex: 1, background: 'white', borderRadius: '12px', padding: '10px', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)', position: 'relative' }}>
                     
+                    {/* КНОПКА ПОГОДИ: По центру вгорі */}
+                    <div style={{ position: 'absolute', top: '15px', left: '50%', transform: 'translateX(-50%)', zIndex: 1000, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '10px', pointerEvents: 'none' }}>
+                        <button 
+                            onClick={(e) => { e.preventDefault(); setShowWeatherOverlay(!showWeatherOverlay); }}
+                            style={{ ...buttonStyle, background: showWeatherOverlay ? '#3b82f6' : 'white', color: showWeatherOverlay ? 'white' : '#475569', border: '2px solid rgba(0,0,0,0.2)', display: 'flex', alignItems: 'center', gap: '8px', padding: '6px 12px', pointerEvents: 'auto', boxShadow: '0 1px 5px rgba(0,0,0,0.65)' }}
+                        >
+                            <Cloud size={16} /> Weather Probe
+                        </button>
+                        
+                        {showWeatherOverlay && currentWeather && (
+                            <div style={weatherWidgetStyle}>
+                                <h4 style={{ margin: '0 0 10px 0', borderBottom: '1px solid #e2e8f0', paddingBottom: '5px', color: '#0f172a', display: 'flex', justifyContent: 'space-between' }}>
+                                    Local Conditions <Activity size={14} color="#3b82f6"/>
+                                </h4>
+                                <div style={{ fontSize: '10px', color: '#94a3b8', marginBottom: '8px', textAlign: 'center' }}>At map center</div>
+                                <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', fontSize: '13px', color: '#475569' }}>
+                                    <div style={{ display: 'flex', justifyContent: 'space-between' }}><span><Thermometer size={14} style={{ display: 'inline', verticalAlign: 'middle', marginRight: '4px' }}/> Temp:</span> <strong>{currentWeather.temperature_2m}°C</strong></div>
+                                    <div style={{ display: 'flex', justifyContent: 'space-between' }}><span><Wind size={14} style={{ display: 'inline', verticalAlign: 'middle', marginRight: '4px' }}/> Wind:</span> <strong>{currentWeather.wind_speed_10m} m/s</strong></div>
+                                    <div style={{ display: 'flex', justifyContent: 'space-between' }}><span><Wind size={14} style={{ display: 'inline', verticalAlign: 'middle', marginRight: '4px', color: '#ef4444' }}/> Gusts:</span> <strong style={{ color: '#ef4444' }}>{currentWeather.wind_gusts_10m} m/s</strong></div>
+                                    <div style={{ display: 'flex', justifyContent: 'space-between' }}><span><CloudRain size={14} style={{ display: 'inline', verticalAlign: 'middle', marginRight: '4px', color: '#3b82f6' }}/> Rain:</span> <strong>{currentWeather.precipitation} mm</strong></div>
+                                </div>
+                            </div>
+                        )}
+                    </div>
+
+                    {/* NFZ LOADING: Знизу ліворуч, щоб не перекривати зум */}
                     {isLoadingNfz && (
-                        <div style={{ position: 'absolute', top: '20px', right: '20px', zIndex: 1000, background: 'white', padding: '8px 12px', borderRadius: '8px', fontSize: '13px', fontWeight: 'bold', color: '#3b82f6', display: 'flex', alignItems: 'center', gap: '8px', boxShadow: '0 2px 10px rgba(0,0,0,0.1)' }}>
+                        <div style={{ position: 'absolute', bottom: '20px', left: '20px', zIndex: 1000, background: 'white', padding: '8px 12px', borderRadius: '8px', fontSize: '13px', fontWeight: 'bold', color: '#3b82f6', display: 'flex', alignItems: 'center', gap: '8px', boxShadow: '0 2px 10px rgba(0,0,0,0.1)' }}>
                             <ShieldAlert size={16} className="animate-spin" /> Scanning Area for NFZ...
                         </div>
                     )}
 
-                    <MapContainer center={[51.5300, 31.3100]} zoom={12} style={{ height: '100%', width: '100%', borderRadius: '8px' }}>
-                        <TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />
+                    <MapContainer center={mapCenter} zoom={12} style={{ height: '100%', width: '100%', borderRadius: '8px', zIndex: 1 }}>
+                        <LayersControl position="topright">
+                            <LayersControl.BaseLayer checked name="Standard Map">
+                                <TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" maxZoom={22} />
+                            </LayersControl.BaseLayer>
+                            <LayersControl.BaseLayer name="Satellite">
+                                <TileLayer url="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}" maxZoom={22} />
+                            </LayersControl.BaseLayer>
+                            
+                            <LayersControl.Overlay name="Live Rain Radar">
+                                <LiveRadarLayer />
+                            </LayersControl.Overlay>
+                        </LayersControl>
                         
+                        <MapTracker setMapCenter={setMapCenter} />
                         <NFZManager setDynamicNfz={setDynamicNfz} setIsLoadingNfz={setIsLoadingNfz} />
 
                         {dynamicNfz.features.length > 0 && (
@@ -386,7 +474,7 @@ function Missions({ profile }) {
                     </div>
                 </div>
 
-                <div style={{ borderBottom: '1px solid #e2e8f0', paddingBottom: '10px', marginBottom: '10px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}><h3 style={{ margin: 0, fontSize: '16px' }}>Flight Plan</h3>{waypoints.length > 0 && <button onClick={saveMissionFile} disabled={hasViolation} style={{...miniButtonStyle, background: hasViolation ? '#94a3b8' : '#10b981', display: 'flex', alignItems: 'center', gap: '5px'}}><Download size={14}/> Export</button>}</div>
+                <div style={{ borderBottom: '1px solid #e2e8f0', paddingBottom: '10px', marginBottom: '10px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}><h3 style={{ margin: '0', fontSize: '16px' }}>Flight Plan</h3>{waypoints.length > 0 && <button onClick={saveMissionFile} disabled={hasViolation} style={{...miniButtonStyle, background: hasViolation ? '#94a3b8' : '#10b981', display: 'flex', alignItems: 'center', gap: '5px'}}><Download size={14}/> Export</button>}</div>
 
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', marginBottom: '20px' }}>
                     {waypoints.length === 0 && <p style={{ fontSize: '13px', color: '#94a3b8' }}>No waypoints added yet.</p>}
@@ -436,5 +524,6 @@ const inputStyle = { padding: '8px', borderRadius: '6px', border: '1px solid #cb
 const buttonStyle = { padding: '10px 16px', color: 'white', border: 'none', borderRadius: '8px', cursor: 'pointer', fontWeight: '600', fontSize: '14px', transition: 'all 0.2s' };
 const miniButtonStyle = { padding: '4px 10px', background: '#3b82f6', color: 'white', border: 'none', borderRadius: '6px', cursor: 'pointer', fontSize: '12px', fontWeight: '600' };
 const waypointCardStyle = { display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 12px', background: '#f8fafc', borderRadius: '8px', border: '1px solid #e2e8f0' };
+const weatherWidgetStyle = { background: 'rgba(255, 255, 255, 0.95)', backdropFilter: 'blur(4px)', padding: '15px', borderRadius: '12px', boxShadow: '0 4px 15px rgba(0,0,0,0.1)', border: '1px solid #e2e8f0', width: '200px', pointerEvents: 'auto' };
 
 export default Missions;

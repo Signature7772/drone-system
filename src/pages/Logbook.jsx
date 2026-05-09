@@ -1,12 +1,12 @@
 import { useState, useEffect, useRef, useMemo } from 'react';
 import { supabase } from '../supabaseClient';
 import Papa from 'papaparse';
-import { MapContainer, TileLayer, Polyline, CircleMarker, useMap } from 'react-leaflet';
+import { MapContainer, TileLayer, Polyline, CircleMarker, useMap, LayersControl } from 'react-leaflet';
 import L from 'leaflet';
 import { Line } from 'react-chartjs-2';
 import { Chart as ChartJS, CategoryScale, LinearScale, PointElement, LineElement, Title, Tooltip, Legend } from 'chart.js';
 import zoomPlugin from 'chartjs-plugin-zoom'; 
-import { Upload, AlertOctagon, Activity, Map as MapIcon, Database, Crosshair, Lightbulb, X, Eye, EyeOff, Target, Save, FolderOpen, Calendar, ChevronUp, ChevronDown, Trash2, Download, Navigation, Clock, List, BarChart2 } from 'lucide-react';
+import { Upload, AlertOctagon, Activity, Map as MapIcon, Database, Crosshair, Lightbulb, X, Eye, EyeOff, Target, Save, FolderOpen, Calendar, ChevronUp, ChevronDown, Trash2, Download, Navigation, Clock, List, BarChart2, Cloud, Thermometer, Wind, CloudRain } from 'lucide-react';
 import { useLocation, useNavigate } from 'react-router-dom';
 
 import jsPDF from 'jspdf';
@@ -25,25 +25,25 @@ function distanceToSegment(P, A, B) {
     return Math.hypot(px - (ax + t * (bx - ax)), py - (ay + t * (by - ay))); 
 }
 
-// === НОВЕ: ДИНАМІЧНИЙ ГЕНЕРАТОР ПОРАД НА ОСНОВІ ДРОНА ===
-const getDynamicAdvice = (type, drone) => {
+const getDynamicAdvice = (type, drone, weather) => {
     const droneName = drone ? `${drone.name} (${drone.model})` : 'the assigned drone';
-    
+    const weatherContext = weather && weather.wind > 5 ? ` We also noticed strong winds (${weather.wind} m/s) in the area during this flight, which likely contributed to this anomaly.` : '';
+
     switch (type) {
         case 'speed':
             return drone?.max_speed 
-                ? `Speed Limit Exceeded: The telemetry shows sudden acceleration beyond safe limits. The hardware specification for ${droneName} restricts safe operation to ${drone.max_speed} m/s. Exceeding this dramatically increases the risk of loss of control, motor burnout, and reduces structural integrity in wind.`
-                : `Speed Anomaly: Sudden stops or overspeeding usually indicate strong wind gusts during field mapping.`;
+                ? `Speed Limit Exceeded: Telemetry shows sudden acceleration beyond safe limits. ${droneName} restricts safe operation to ${drone.max_speed} m/s.${weatherContext} Exceeding this dramatically increases the risk of loss of control.`
+                : `Speed Anomaly: Sudden stops or overspeeding usually indicate strong wind gusts.${weatherContext}`;
         case 'time':
             return drone?.max_flight_time
-                ? `Critical Flight Time: You flew longer than the recommended maximum. The manufacturer limit for ${droneName} is ${drone.max_flight_time} minutes. Operating beyond this threshold severely compromises battery health and risks sudden mid-air power failure. Redesign your survey routes to be shorter.`
+                ? `Critical Flight Time: You flew longer than the recommended maximum. The manufacturer limit for ${droneName} is ${drone.max_flight_time} minutes.${weatherContext} Operating beyond this severely compromises battery health.`
                 : `Flight Time Exceeded: The drone flew longer than its rated maximum flight time. Plan shorter survey routes.`;
         case 'battery':
-            return `Battery Voltage Drop: Voltage dropped below 10.5V. Check the battery health for ${droneName}. Avoid flying with degraded or old batteries, especially in cold weather.`;
+            return `Battery Voltage Drop: Voltage dropped below 10.5V. Check the battery health for ${droneName}.${weatherContext && weather.temp < 10 ? ` Also, the temperature was cold (${weather.temp}°C), which significantly reduces battery efficiency.` : ''}`;
         case 'gps':
-            return `GPS Signal Loss: The satellite count dropped to critical levels. This may indicate a dense flying environment (trees/buildings), heavy cloud cover, or solar interference. Ensure the RTH (Return To Home) protocol uses barometer fallbacks.`;
+            return `GPS Signal Loss: The satellite count dropped to critical levels. Ensure the RTH uses barometer fallbacks.`;
         case 'course':
-            return `Off-Course Deviation: The drone was pushed off the planned trajectory by more than 10 meters. Check the compass calibration on ${droneName} before the next flight. Also, review the wind conditions during this mission.`;
+            return `Off-Course Deviation: The drone was pushed off the planned trajectory by more than 10 meters.${weatherContext} Check the compass calibration on ${droneName} before the next flight.`;
         default:
             return "Review telemetry for potential hardware or environmental anomalies.";
     }
@@ -237,13 +237,16 @@ function Logbook({ profile }) {
     const [showActual, setShowActual] = useState(true);
     const [showAnomalies, setShowAnomalies] = useState(true);
     
+    // СТАН ІСТОРИЧНОЇ ПОГОДИ
+    const [flightWeather, setFlightWeather] = useState(null);
+    const [showWeatherOverlay, setShowWeatherOverlay] = useState(false);
+
     const [logName, setLogName] = useState('');
     const [actualFlightDistance, setActualFlightDistance] = useState(0); 
     const [actualFlightTime, setActualFlightTime] = useState(0); 
     const [actualAnomaliesCount, setActualAnomaliesCount] = useState(0); 
 
     const [isSavingLog, setIsSavingLog] = useState(false);
-    
     const [isExporting, setIsExporting] = useState(false);
     const [isPdfMode, setIsPdfMode] = useState(false);
 
@@ -298,7 +301,7 @@ function Logbook({ profile }) {
         if (mission) setLogName(`Analysis: ${mission.name}`); 
         else setLogName('');
         
-        setTelemetryData([]); setAnomalies([]); setActualFlightDistance(0); setActualFlightTime(0); setActualAnomaliesCount(0);
+        setTelemetryData([]); setAnomalies([]); setActualFlightDistance(0); setActualFlightTime(0); setActualAnomaliesCount(0); setFlightWeather(null);
     };
 
     const calculateDistanceSafely = (dataArray) => {
@@ -330,6 +333,42 @@ function Logbook({ profile }) {
         return null;
     };
 
+    // ФУНКЦІЯ ОТРИМАННЯ ІСТОРИЧНОЇ ПОГОДИ ЗА ДАТОЮ ПОЛЬОТУ
+    const fetchHistoricalWeather = async (lat, lng, dateString) => {
+        try {
+            const targetDate = new Date(dateString || Date.now());
+            const today = new Date();
+            const diffDays = (today - targetDate) / (1000 * 60 * 60 * 24);
+            const isHistorical = diffDays > 5;
+            
+            const baseUrl = isHistorical 
+                ? 'https://archive-api.open-meteo.com/v1/archive' 
+                : 'https://api.open-meteo.com/v1/forecast';
+
+            const year = targetDate.getFullYear();
+            const month = String(targetDate.getMonth() + 1).padStart(2, '0');
+            const day = String(targetDate.getDate()).padStart(2, '0');
+            const formattedDate = `${year}-${month}-${day}`;
+            
+            const hour = targetDate.getHours() || 12;
+
+            const res = await fetch(`${baseUrl}?latitude=${lat}&longitude=${lng}&start_date=${formattedDate}&end_date=${formattedDate}&hourly=temperature_2m,wind_speed_10m,wind_gusts_10m,precipitation&wind_speed_unit=ms&timezone=auto`);
+            const data = await res.json();
+
+            if (data && data.hourly) {
+                setFlightWeather({
+                    temp: data.hourly.temperature_2m[hour] ?? data.hourly.temperature_2m[0],
+                    wind: data.hourly.wind_speed_10m[hour] ?? data.hourly.wind_speed_10m[0],
+                    gusts: data.hourly.wind_gusts_10m[hour] ?? data.hourly.wind_gusts_10m[0],
+                    rain: data.hourly.precipitation[hour] ?? data.hourly.precipitation[0],
+                    date: targetDate.toLocaleString('en-GB')
+                });
+            }
+        } catch (e) {
+            console.error("Historical weather fetch failed", e);
+        }
+    };
+
     const handleFileUpload = (event) => {
         const file = event.target.files[0];
         if (!file) return;
@@ -337,6 +376,17 @@ function Logbook({ profile }) {
         Papa.parse(file, {
             header: true, dynamicTyping: true, skipEmptyLines: 'greedy', 
             complete: (results) => {
+                
+                let realFlightDate = new Date(file.lastModified); 
+                const firstRow = results.data[0];
+                if (firstRow) {
+                    const dateKey = Object.keys(firstRow).find(k => k.toLowerCase().includes('datetime') || k.toLowerCase().includes('utc') || k.toLowerCase() === 'date');
+                    if (dateKey && firstRow[dateKey]) {
+                        const parsedDate = new Date(firstRow[dateKey]);
+                        if (!isNaN(parsedDate.getTime())) realFlightDate = parsedDate;
+                    }
+                }
+
                 const normalizedData = results.data
                     .map((row, index) => {
                         const latKey = ALIASES.lat.find(k => row[k] !== undefined && row[k] !== null && row[k] !== '');
@@ -380,6 +430,8 @@ function Logbook({ profile }) {
                     return;
                 }
 
+                normalizedData[0].absolute_date = realFlightDate.toISOString();
+
                 const calculatedDist = calculateDistanceSafely(normalizedData);
                 const detectedErrs = runAnomalyDetector(normalizedData, selectedMission?.waypoints, selectedMission?.drones);
                 const fTime = normalizedData.length > 1 ? (normalizedData[normalizedData.length - 1].time - normalizedData[0].time) : 0;
@@ -388,6 +440,8 @@ function Logbook({ profile }) {
                 setActualFlightTime(fTime > 0 ? fTime : normalizedData.length);
                 setActualAnomaliesCount(detectedErrs.length);
                 setTelemetryData(normalizedData);
+
+                fetchHistoricalWeather(normalizedData[0].lat, normalizedData[0].lng, realFlightDate.toISOString());
             }
         });
     };
@@ -437,6 +491,11 @@ function Logbook({ profile }) {
         setActualFlightTime(time);
         setActualAnomaliesCount(aCount);
         setIsReportOpen(true); setIsChartOpen(true);
+
+        if (validData.length > 0) {
+            const flightDate = validData[0]?.absolute_date || log.created_at;
+            fetchHistoricalWeather(validData[0].lat, validData[0].lng, flightDate);
+        }
     };
 
     const deleteLogFromDB = async (id) => {
@@ -468,10 +527,8 @@ function Logbook({ profile }) {
 
                     for (let i = 0; i < blocks.length; i++) {
                         const block = blocks[i];
-                        
                         const canvas = await html2canvas(block, { scale: 2, useCORS: true });
                         const imgData = canvas.toDataURL('image/png');
-                        
                         const imgHeight = (canvas.height * maxImgWidth) / canvas.width;
 
                         if (currentY + imgHeight > pdfHeight - 10 && !isFirstPage) {
@@ -546,7 +603,7 @@ function Logbook({ profile }) {
         });
         
         const uniqueAnomalies = detectedAnomalies.filter((v, i, a) => a.findIndex(t => (t.text === v.text)) === i);
-        setAnomalies(uniqueAnomalies.slice(0, 10)); setCourseErrorTimes(cTimes); setPointErrorTimes(pTimes); setAnomalyTypes(types);
+        setAnomalies(uniqueAnomalies); setCourseErrorTimes(cTimes); setPointErrorTimes(pTimes); setAnomalyTypes(types);
         return uniqueAnomalies;
     };
 
@@ -561,13 +618,13 @@ function Logbook({ profile }) {
     return (
         <div style={{ display: 'flex', flexDirection: 'column', gap: '20px', height: 'calc(100vh - 80px)', position: 'relative' }}>
             
-            {/* ОНОВЛЕНО: Модалка з персоналізованими порадами */}
+            {/* ОНОВЛЕНІ ПЕРСОНАЛІЗОВАНІ ТА ПОГОДНІ ПОРАДИ */}
             {showTips && !isPdfMode && ( 
                 <div style={modalOverlayStyle}>
                     <div style={modalContentStyle}>
                         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid #e2e8f0', paddingBottom: '10px', marginBottom: '15px' }}>
                             <h2 style={{ margin: 0, display: 'flex', alignItems: 'center', gap: '10px' }}>
-                                <Lightbulb color="#f59e0b" /> Incident Analysis & Recommendations
+                                <Lightbulb color="#f59e0b" /> Intelligent Analysis & Recommendations
                             </h2>
                             <button onClick={() => setShowTips(false)} style={{ background: 'none', border: 'none', cursor: 'pointer' }}><X size={24} color="#64748b" /></button>
                         </div>
@@ -576,11 +633,11 @@ function Logbook({ profile }) {
                         ) : ( 
                             <div style={{ display: 'flex', flexDirection: 'column', gap: '15px' }}>
                                 <p style={{ margin: 0, color: '#475569' }}>
-                                    Based on the telemetry data and the specific hardware limits of <strong>{selectedMission?.drones?.name || 'this drone'}</strong>, we recommend reviewing the following systems:
+                                    Based on the telemetry data, historical weather conditions, and the specific hardware limits of <strong>{selectedMission?.drones?.name || 'this drone'}</strong>, we recommend reviewing the following systems:
                                 </p>
                                 {Array.from(anomalyTypes).map(type => ( 
                                     <div key={type} style={{ background: '#f8fafc', padding: '15px', borderRadius: '8px', borderLeft: '4px solid #f59e0b', fontSize: '14px', lineHeight: '1.5' }}>
-                                        <strong>{type.toUpperCase()}:</strong> {getDynamicAdvice(type, selectedMission?.drones)}
+                                        <strong>{type.toUpperCase()}:</strong> {getDynamicAdvice(type, selectedMission?.drones, flightWeather)}
                                     </div> 
                                 ))}
                             </div> 
@@ -621,32 +678,93 @@ function Logbook({ profile }) {
                 }
             }>
                 {isPdfMode && (
-                    <div className="pdf-block" style={{ borderBottom: '2px solid #e2e8f0', paddingBottom: '15px' }}>
-                        <h1 style={{ margin: '0 0 10px 0', color: '#0f172a' }}>Flight Analysis Report</h1>
-                        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '14px', color: '#475569' }}>
-                            <div>
-                                <strong>Analysis Name:</strong> {logName || 'Unnamed Analysis'}<br/>
-                                <strong>Date Generated:</strong> {new Date().toLocaleString('en-GB')}
-                            </div>
-                            <div style={{ textAlign: 'right' }}>
-                                <strong>Flown Distance:</strong> {(actualFlightDistance / 1000).toFixed(2)} km<br/>
-                                <strong>Flight Time:</strong> {formatTime(actualFlightTime)} | <strong>Issues:</strong> {actualAnomaliesCount}<br/>
-                                {selectedMission?.drones && (<><strong>Assigned Fleet:</strong> {selectedMission.drones.name} ({selectedMission.drones.model})</>)}
-                            </div>
+    <div className="pdf-block" style={{ borderBottom: '2px solid #e2e8f0', paddingBottom: '15px' }}>
+        <h1 style={{ margin: '0 0 10px 0', color: '#0f172a' }}>Flight Analysis Report</h1>
+        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '14px', color: '#475569' }}>
+            
+            {/* Ліва колонка: Базова інформація */}
+            <div style={{ flex: 1 }}>
+                <strong>Analysis Name:</strong> {logName || 'Unnamed Analysis'}<br/>
+                <strong>Date Generated:</strong> {new Date().toLocaleString('en-GB')}<br/>
+                {selectedMission?.drones && (<><strong>Assigned Fleet:</strong> {selectedMission.drones.name} ({selectedMission.drones.model})</>)}
+            </div>
+
+            {/* Центральна колонка: Історична погода */}
+            <div style={{ flex: 1, borderLeft: '1px solid #e2e8f0', borderRight: '1px solid #e2e8f0', padding: '0 15px', margin: '0 15px' }}>
+                {flightWeather ? (
+                    <>
+                        <strong style={{ display: 'flex', alignItems: 'center', gap: '4px' }}><Cloud size={14}/> Flight Weather ({flightWeather.date})</strong>
+                        <div style={{ marginTop: '4px', display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '4px', fontSize: '13px' }}>
+                            <span><Thermometer size={12} style={{ display: 'inline' }}/> {flightWeather.temp}°C</span>
+                            <span><CloudRain size={12} style={{ display: 'inline', color: '#3b82f6' }}/> {flightWeather.rain} mm</span>
+                            <span><Wind size={12} style={{ display: 'inline' }}/> {flightWeather.wind} m/s</span>
+                            <span>Gusts: <strong style={{ color: '#ef4444' }}>{flightWeather.gusts} m/s</strong></span>
                         </div>
-                    </div>
+                    </>
+                ) : (
+                    <strong>No weather data available for this flight.</strong>
                 )}
+            </div>
+
+            {/* Права колонка: Статистика */}
+            <div style={{ flex: 1, textAlign: 'right' }}>
+                <strong>Flown Distance:</strong> {(actualFlightDistance / 1000).toFixed(2)} km<br/>
+                <strong>Flight Time:</strong> {formatTime(actualFlightTime)}<br/>
+                <strong>Issues Detected:</strong> <span style={{ color: actualAnomaliesCount > 0 ? '#ef4444' : '#10b981', fontWeight: 'bold' }}>{actualAnomaliesCount}</span>
+            </div>
+
+        </div>
+    </div>
+)}
 
                 <div className={isPdfMode ? "pdf-block" : ""} style={{
                     flex: isPdfMode ? 'none' : 1.5,
                     height: isPdfMode ? '450px' : 'auto', 
-                    background: 'white', borderRadius: '12px', padding: '15px', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)', display: 'flex', flexDirection: 'column'
+                    background: 'white', borderRadius: '12px', padding: '15px', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)', display: 'flex', flexDirection: 'column', position: 'relative'
                 }}>
                     <h3 style={{ margin: '0 0 10px 0', display: 'flex', alignItems: 'center', gap: '8px', fontSize: '16px' }}><MapIcon size={20}/> Flight Path Overlay</h3>
+                    
                     {!isPdfMode && ( <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}><div style={{ display: 'flex', gap: '15px', fontSize: '13px', fontWeight: 'bold' }}><div onClick={() => setShowPlanned(!showPlanned)} style={{ display: 'flex', alignItems: 'center', gap: '4px', color: '#3b82f6', cursor: 'pointer', opacity: showPlanned ? 1 : 0.4, transition: 'opacity 0.2s' }}>{showPlanned ? <Eye size={16}/> : <EyeOff size={16}/>} ─── Planned</div><div onClick={() => setShowActual(!showActual)} style={{ display: 'flex', alignItems: 'center', gap: '4px', color: '#fca5a5', cursor: 'pointer', opacity: showActual ? 1 : 0.4, transition: 'opacity 0.2s' }}>{showActual ? <Eye size={16}/> : <EyeOff size={16}/>} - - - Actual</div><div onClick={() => setShowAnomalies(!showAnomalies)} style={{ display: 'flex', alignItems: 'center', gap: '4px', color: '#991b1b', cursor: 'pointer', opacity: showAnomalies ? 1 : 0.4, transition: 'opacity 0.2s' }}>{showAnomalies ? <Eye size={16}/> : <EyeOff size={16}/>} ───/● Anomalies</div></div></div> )}
+                    
                     <div style={{ flex: 1, borderRadius: '8px', overflow: 'hidden', border: '1px solid #e2e8f0', position: 'relative' }}>
-                        <MapContainer preferCanvas={true} center={[51.5300, 31.3100]} zoom={14} style={{ height: '100%', width: '100%' }}>
-                            <TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />
+                        
+                        {/* ВІДЖЕТ ПОГОДИ (ПО ЦЕНТРУ ВГОРІ) */}
+                        {!isPdfMode && telemetryData.length > 0 && (
+                            <div style={{ position: 'absolute', top: '15px', left: '50%', transform: 'translateX(-50%)', zIndex: 1000, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '10px', pointerEvents: 'none' }}>
+                                <button 
+                                    onClick={(e) => { e.preventDefault(); setShowWeatherOverlay(!showWeatherOverlay); }}
+                                    style={{ ...buttonStyle, background: showWeatherOverlay ? '#3b82f6' : 'white', color: showWeatherOverlay ? 'white' : '#475569', border: '2px solid rgba(0,0,0,0.2)', display: 'flex', alignItems: 'center', gap: '8px', padding: '6px 12px', pointerEvents: 'auto', boxShadow: '0 1px 5px rgba(0,0,0,0.65)' }}
+                                >
+                                    <Cloud size={16} /> Historic Weather
+                                </button>
+                                
+                                {showWeatherOverlay && flightWeather && (
+                                    <div style={weatherWidgetStyle}>
+                                        <h4 style={{ margin: '0 0 10px 0', borderBottom: '1px solid #e2e8f0', paddingBottom: '5px', color: '#0f172a', display: 'flex', justifyContent: 'space-between' }}>
+                                            Flight Conditions <Activity size={14} color="#3b82f6"/>
+                                        </h4>
+                                        <div style={{ fontSize: '10px', color: '#94a3b8', marginBottom: '8px', textAlign: 'center' }}>For: {flightWeather.date}</div>
+                                        <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', fontSize: '13px', color: '#475569' }}>
+                                            <div style={{ display: 'flex', justifyContent: 'space-between' }}><span><Thermometer size={14} style={{ display: 'inline', verticalAlign: 'middle', marginRight: '4px' }}/> Temp:</span> <strong>{flightWeather.temp}°C</strong></div>
+                                            <div style={{ display: 'flex', justifyContent: 'space-between' }}><span><Wind size={14} style={{ display: 'inline', verticalAlign: 'middle', marginRight: '4px' }}/> Wind:</span> <strong>{flightWeather.wind} m/s</strong></div>
+                                            <div style={{ display: 'flex', justifyContent: 'space-between' }}><span><Wind size={14} style={{ display: 'inline', verticalAlign: 'middle', marginRight: '4px', color: '#ef4444' }}/> Gusts:</span> <strong style={{ color: '#ef4444' }}>{flightWeather.gusts} m/s</strong></div>
+                                            <div style={{ display: 'flex', justifyContent: 'space-between' }}><span><CloudRain size={14} style={{ display: 'inline', verticalAlign: 'middle', marginRight: '4px', color: '#3b82f6' }}/> Rain:</span> <strong>{flightWeather.rain} mm</strong></div>
+                                        </div>
+                                    </div>
+                                )}
+                            </div>
+                        )}
+
+                        <MapContainer preferCanvas={true} center={[51.5300, 31.3100]} zoom={14} style={{ height: '100%', width: '100%', zIndex: 1 }}>
+                            <LayersControl position="topright">
+                                <LayersControl.BaseLayer checked name="Standard Map">
+                                    <TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" maxZoom={22} />
+                                </LayersControl.BaseLayer>
+                                <LayersControl.BaseLayer name="Satellite">
+                                    <TileLayer url="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}" maxZoom={22} />
+                                </LayersControl.BaseLayer>
+                            </LayersControl>
+
                             <MapController bounds={mapBounds} isPdfMode={isPdfMode} />
                             {selectedMission && showPlanned && <Polyline positions={selectedMission.waypoints.map(wp => [wp.lat, wp.lng])} color="#3b82f6" weight={4} opacity={0.5} />}
                             {showActual && telemetryData.length > 0 && <Polyline positions={telemetryData.map(dp => [dp.lat, dp.lng])} color="#fca5a5" weight={3} dashArray="8, 8" />}
@@ -667,7 +785,7 @@ function Logbook({ profile }) {
                             </div>
                             <div style={{ flex: 1, background: '#fffbeb', border: '1px solid #fde047', borderRadius: '12px', padding: '15px' }}>
                                 <h3 style={{ margin: '0 0 10px 0', color: '#854d0e', display: 'flex', alignItems: 'center', gap: '8px', fontSize: '16px' }}><Lightbulb size={20} /> Recommendations</h3>
-                                {anomalyTypes.size === 0 ? ( <p style={{ color: '#854d0e', margin: 0, fontSize: '14px' }}>No recommendations required.</p> ) : ( <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', fontSize: '13px', color: '#854d0e' }}>{Array.from(anomalyTypes).map(type => ( <div key={type}><strong>{type.toUpperCase()}:</strong> {getDynamicAdvice(type, selectedMission?.drones)}</div> ))}</div> )}
+                                {anomalyTypes.size === 0 ? ( <p style={{ color: '#854d0e', margin: 0, fontSize: '14px' }}>No recommendations required.</p> ) : ( <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', fontSize: '13px', color: '#854d0e' }}>{Array.from(anomalyTypes).map(type => ( <div key={type}><strong>{type.toUpperCase()}:</strong> {getDynamicAdvice(type, selectedMission?.drones, flightWeather)}</div> ))}</div> )}
                             </div>
                         </div>
                         
@@ -731,7 +849,7 @@ function Logbook({ profile }) {
                                     {isReportOpen ? <ChevronUp size={20} color="#64748b"/> : <ChevronDown size={20} color="#64748b"/>}
                                 </div>
                             </div>
-                            {isReportOpen && ( <div style={{ marginTop: '15px' }}>{anomalies.length === 0 ? ( <p style={{ color: '#166534', margin: 0, fontSize: '14px' }}>Waiting for log data or no anomalies detected.</p> ) : ( <ul style={{ color: '#991b1b', margin: 0, paddingLeft: '20px', fontSize: '13px', lineHeight: '1.5' }}>{anomalies.map((a, i) => ( <li key={i} onMouseEnter={() => { const point = telemetryData.find(d => d.time === a.time); if (point) setHoveredPoint(point); }} onMouseLeave={() => setHoveredPoint(null)} style={{ marginBottom: '4px', background: hoveredPoint?.time === a.time ? '#fef08a' : 'transparent', transition: 'background 0.2s', cursor: 'pointer', padding: '2px 4px', borderRadius: '4px' }}>{a.text}</li> ))}</ul> )}</div> )}
+                            {isReportOpen && ( <div style={{ marginTop: '15px' }}>{anomalies.length === 0 ? ( <p style={{ color: '#166534', margin: 0, fontSize: '14px' }}>Waiting for log data or no anomalies detected.</p> ) : ( <ul style={{ color: '#991b1b', margin: 0, paddingLeft: '20px', fontSize: '13px', lineHeight: '1.5', maxHeight: '200px', overflowY: 'auto', paddingRight: '10px' }}>{anomalies.map((a, i) => ( <li key={i} onMouseEnter={() => { const point = telemetryData.find(d => d.time === a.time); if (point) setHoveredPoint(point); }} onMouseLeave={() => setHoveredPoint(null)} style={{ marginBottom: '4px', background: hoveredPoint?.time === a.time ? '#fef08a' : 'transparent', transition: 'background 0.2s', cursor: 'pointer', padding: '2px 4px', borderRadius: '4px' }}>{a.text}</li> ))}</ul> )}</div> )}
                         </div>
 
                         {/* Динамічні графіки */}
@@ -786,7 +904,8 @@ const inputStyle = { width: '100%', padding: '10px', borderRadius: '8px', border
 const buttonStyle = { padding: '10px 16px', color: 'white', border: 'none', borderRadius: '8px', cursor: 'pointer', fontWeight: '600', fontSize: '14px', transition: 'all 0.2s' };
 const miniButtonStyle = { padding: '4px 10px', background: '#3b82f6', color: 'white', border: 'none', borderRadius: '6px', cursor: 'pointer', fontSize: '12px', fontWeight: '600' };
 const waypointCardStyle = { display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 12px', background: '#f8fafc', borderRadius: '8px', border: '1px solid #e2e8f0' };
-const modalOverlayStyle = { position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(15, 23, 42, 0.7)', display: 'flex', justifyContent: 'center', alignItems: 'center', zIndex: 9999, backdropFilter: 'blur(2px)' };
-const modalContentStyle = { background: 'white', padding: '30px', borderRadius: '16px', width: '600px', maxWidth: '90%', boxShadow: '0 20px 25px -5px rgb(0 0 0 / 0.1)', maxHeight: '90vh', overflowY: 'auto' };
+const weatherWidgetStyle = { background: 'rgba(255, 255, 255, 0.95)', backdropFilter: 'blur(4px)', padding: '15px', borderRadius: '12px', boxShadow: '0 4px 15px rgba(0,0,0,0.1)', border: '1px solid #e2e8f0', width: '200px', pointerEvents: 'auto' };
+const modalOverlayStyle = { position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(15, 23, 42, 0.75)', backdropFilter: 'blur(4px)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 10000 };
+const modalContentStyle = { background: 'white', padding: '24px', borderRadius: '16px', width: '90%', maxWidth: '600px', maxHeight: '80vh', overflowY: 'auto', boxShadow: '0 25px 50px -12px rgba(0, 0, 0, 0.25)' };
 
 export default Logbook;
