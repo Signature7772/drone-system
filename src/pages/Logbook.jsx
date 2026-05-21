@@ -6,11 +6,19 @@ import L from 'leaflet';
 import { Line } from 'react-chartjs-2';
 import { Chart as ChartJS, CategoryScale, LinearScale, PointElement, LineElement, Title, Tooltip, Legend } from 'chart.js';
 import zoomPlugin from 'chartjs-plugin-zoom'; 
-import { Upload, AlertOctagon, Activity, Map as MapIcon, Database, Crosshair, Lightbulb, X, Eye, EyeOff, Target, Save, FolderOpen, Calendar, ChevronUp, ChevronDown, Trash2, Download, Navigation, Clock, List, BarChart2, Cloud, Thermometer, Wind, CloudRain } from 'lucide-react';
+import { 
+    Upload, AlertOctagon, Activity, Map as MapIcon, Database, Crosshair, 
+    Lightbulb, X, Eye, EyeOff, Target, Save, FolderOpen, Calendar, 
+    ChevronUp, ChevronDown, Trash2, Download, Navigation, Clock, 
+    List, BarChart2, Cloud, Thermometer, Wind, CloudRain, Box, Search, Battery 
+} from 'lucide-react';
 import { useLocation, useNavigate } from 'react-router-dom';
-
 import jsPDF from 'jspdf';
 import html2canvas from 'html2canvas';
+
+// === ІМПОРТИ ДЛЯ 3D ===
+import { Canvas } from '@react-three/fiber';
+import { OrbitControls, Line as ThreeLine, Grid, Sphere, Html, Bounds } from '@react-three/drei';
 
 ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, Title, Tooltip, Legend, zoomPlugin);
 
@@ -30,22 +38,14 @@ const getDynamicAdvice = (type, drone, weather) => {
     const weatherContext = weather && weather.wind > 5 ? ` We also noticed strong winds (${weather.wind} m/s) in the area during this flight, which likely contributed to this anomaly.` : '';
 
     switch (type) {
-        case 'speed':
-            return drone?.max_speed 
-                ? `Speed Limit Exceeded: Telemetry shows sudden acceleration beyond safe limits. ${droneName} restricts safe operation to ${drone.max_speed} m/s.${weatherContext} Exceeding this dramatically increases the risk of loss of control.`
-                : `Speed Anomaly: Sudden stops or overspeeding usually indicate strong wind gusts.${weatherContext}`;
-        case 'time':
-            return drone?.max_flight_time
-                ? `Critical Flight Time: You flew longer than the recommended maximum. The manufacturer limit for ${droneName} is ${drone.max_flight_time} minutes.${weatherContext} Operating beyond this severely compromises battery health.`
-                : `Flight Time Exceeded: The drone flew longer than its rated maximum flight time. Plan shorter survey routes.`;
-        case 'battery':
-            return `Battery Voltage Drop: Voltage dropped below 10.5V. Check the battery health for ${droneName}.${weatherContext && weather.temp < 10 ? ` Also, the temperature was cold (${weather.temp}°C), which significantly reduces battery efficiency.` : ''}`;
-        case 'gps':
-            return `GPS Signal Loss: The satellite count dropped to critical levels. Ensure the RTH uses barometer fallbacks.`;
-        case 'course':
-            return `Off-Course Deviation: The drone was pushed off the planned trajectory by more than 10 meters.${weatherContext} Check the compass calibration on ${droneName} before the next flight.`;
-        default:
-            return "Review telemetry for potential hardware or environmental anomalies.";
+        case 'speed': return drone?.max_speed ? `Speed Limit Exceeded: Telemetry shows sudden acceleration beyond safe limits. ${droneName} restricts safe operation to ${drone.max_speed} m/s.${weatherContext}` : `Speed Anomaly: Sudden stops or overspeeding usually indicate strong wind gusts.${weatherContext}`;
+        case 'time': return drone?.max_flight_time ? `Critical Flight Time: You flew longer than the recommended maximum. The limit for ${droneName} is ${drone.max_flight_time} minutes.${weatherContext}` : `Flight Time Exceeded: Plan shorter survey routes.`;
+        case 'battery': return `Battery Voltage Drop: Voltage dropped below 10.5V. Check battery health for ${droneName}.${weatherContext && weather.temp < 10 ? ` Also, cold temp (${weather.temp}°C) reduces efficiency.` : ''}`;
+        case 'gps': return `GPS Signal Loss: The satellite count dropped to critical levels.`;
+        case 'course': return `Off-Course Deviation: The drone was pushed off trajectory by more than 10m.${weatherContext} Check compass calibration.`;
+        case 'zspeed': return `Rapid Descent Detected: Descending faster than 4 m/s can cause Vortex Ring State (VRS), leading to a catastrophic crash. Advise pilots to descend at an angle rather than straight down.`;
+        case 'throttle': return `Motor Overload: Throttle reached maximum capacity (>95%). This indicates the drone was fighting strong winds, carrying excessive payload, or has degraded motors.${weatherContext}`;
+        default: return "Review telemetry for potential hardware or environmental anomalies.";
     }
 };
 
@@ -55,51 +55,164 @@ const ALIASES = {
     lng: ['lng', 'lon', 'Longitude', 'longitude', 'OSD.longitude', 'longitude(degrees)', 'GPS.Lng'],
     alt: ['alt', 'Altitude(meters)', 'height', 'Altitude', 'altitude(feet)', 'height_above_takeoff(feet)', 'OSD.altitude', 'GPS.Alt'],
     speed: ['speed', 'HSpeed(m/s)', 'Speed(m/s)', 'GroundSpeed', 'speed(mph)', 'OSD.speed'],
+    zSpeed: ['zSpeed', 'zSpeed(mph)', ' zSpeed(mph)', 'vz'],
+    windSpeed: ['windSpeed', 'wind_speed(mph)', 'wind_speed', 'WindSpeed'], 
+    throttle: ['throttle', 'rc_throttle(percent)', 'rc_throttle', 'Throttle'], 
+    batteryPercent: ['batteryPercent', 'battery_percent', 'BatteryPercent', 'bat_percent'], 
     battery: ['battery', 'BatteryVoltage', 'voltage(v)', 'Voltage', 'BAT.Volt', 'OSD.battery'],
     satellites: ['satellites', 'GpsCount', 'num_sats', 'GPS.Sats', 'Satellites', 'sats'],
     pitch: ['pitch', 'Pitch', 'pitch(degrees)', 'Pitch(degrees)', 'Pitch(deg)', 'pitch_angle'],
     roll: ['roll', 'Roll', 'roll(degrees)', 'Roll(degrees)', 'Roll(deg)', 'roll_angle'],
     yaw: ['yaw', 'Yaw', 'yaw(360)', 'compass_heading(degrees)', 'Yaw(degrees)', 'Yaw(deg)', 'yaw_angle'],
     temperature: ['temperature', 'battery_temperature(f)', 'Temp', 'OSD.temperature'],
-    current: ['current(a)', 'current', 'Amperage', 'Current', 'OSD.current']
+    current: ['current', 'current(a)', 'Amperage', 'Current', 'OSD.current']
 };
 
 const METRICS = [
     { key: 'alt', label: 'Altitude', unit: 'm', color: '#3b82f6', icon: <Navigation size={16}/> },
     { key: 'speed', label: 'Speed', unit: 'm/s', color: '#f59e0b', icon: <Activity size={16}/> },
+    // ДОДАНО: Графік для вертикальної швидкості
+    { key: 'zSpeed', label: 'Vertical Speed', unit: 'm/s', color: '#0ea5e9', icon: <Activity size={16}/> },
+    // ДОДАНО: Графік для відсотка батареї
+    { key: 'batteryPercent', label: 'Battery Level', unit: '%', color: '#10b981', icon: <Battery size={16}/> },
     { key: 'battery', label: 'Battery Voltage', unit: 'V', color: '#ef4444', icon: <AlertOctagon size={16}/> },
     { key: 'satellites', label: 'Satellites', unit: 'sats', color: '#8b5cf6', icon: <Target size={16}/> },
-    { key: 'pitch', label: 'Pitch (Тангаж)', unit: '°', color: '#10b981', icon: <Navigation size={16}/> },
-    { key: 'roll', label: 'Roll (Крен)', unit: '°', color: '#14b8a6', icon: <Navigation size={16}/> },
-    { key: 'yaw', label: 'Yaw (Напрямок)', unit: '°', color: '#6366f1', icon: <Navigation size={16}/> },
-    { key: 'temperature', label: 'Battery Temp', unit: '°C', color: '#ef4444', icon: <Activity size={16}/> },
-    { key: 'current', label: 'Current Draw', unit: 'A', color: '#f97316', icon: <Activity size={16}/> },
+    { key: 'windSpeed', label: 'In-flight Wind', unit: 'm/s', color: '#64748b', icon: <Wind size={16}/> },
+    // ДОДАНО: Графік для газу
+    { key: 'throttle', label: 'RC Throttle', unit: '%', color: '#8b5cf6', icon: <Activity size={16}/> },
+    { key: 'pitch', label: 'Pitch', unit: '°', color: '#10b981', icon: <Navigation size={16}/> },
+    { key: 'roll', label: 'Roll', unit: '°', color: '#14b8a6', icon: <Navigation size={16}/> },
+    { key: 'yaw', label: 'Yaw', unit: '°', color: '#6366f1', icon: <Navigation size={16}/> },
+    { key: 'temperature', label: 'Battery Temp', unit: '°C', color: '#ef4444', icon: <Thermometer size={16}/> }, 
+    { key: 'current', label: 'Current Draw', unit: 'A', color: '#f97316', icon: <Activity size={16}/> }, 
 ];
 
 function MapController({ bounds, isPdfMode }) {
     const map = useMap();
-    useEffect(() => { if (bounds && bounds.length > 0) { map.fitBounds(bounds, { padding: [50, 50] }); } }, [bounds, map]);
+    useEffect(() => { if (bounds && bounds.length > 0) map.fitBounds(bounds, { padding: [50, 50] }); }, [bounds, map]);
     useEffect(() => {
-        setTimeout(() => {
-            map.invalidateSize();
-            if (bounds && bounds.length > 0) { map.fitBounds(bounds, { padding: [50, 50], animate: false }); }
-        }, 300);
+        setTimeout(() => { map.invalidateSize(); if (bounds && bounds.length > 0) map.fitBounds(bounds, { padding: [50, 50], animate: false }); }, 300);
     }, [isPdfMode, map, bounds]);
     return null;
 }
 
+const Flight3DView = ({ telemetryData, hoveredPoint, setHoveredPoint, pointErrorTimes }) => {
+    
+    const { points, minAlt } = useMemo(() => {
+        if (!telemetryData || telemetryData.length === 0) return { points: [[0,0,0]], minAlt: 0 };
+        const centerLat = telemetryData[0].lat;
+        const centerLng = telemetryData[0].lng;
+        const R = 6378137; 
+        
+        let minAltitude = Infinity;
+        telemetryData.forEach(d => {
+            if (d.alt !== null && d.alt < minAltitude) minAltitude = d.alt;
+        });
+        if (minAltitude === Infinity) minAltitude = 0;
+
+        const pts = telemetryData.map(d => {
+            const x = (d.lng - centerLng) * (Math.PI / 180) * R * Math.cos(centerLat * Math.PI / 180);
+            const z = (d.lat - centerLat) * (Math.PI / 180) * R * -1; 
+            const y = d.alt !== null ? (d.alt - minAltitude) : 0; 
+            return [x, y, z];
+        });
+        return { points: pts, minAlt: minAltitude };
+    }, [telemetryData]);
+
+    const hoveredPos = useMemo(() => {
+        if (!hoveredPoint || !telemetryData || telemetryData.length === 0) return null;
+        const centerLat = telemetryData[0].lat;
+        const centerLng = telemetryData[0].lng;
+        const R = 6378137; 
+        const x = (hoveredPoint.lng - centerLng) * (Math.PI / 180) * R * Math.cos(centerLat * Math.PI / 180);
+        const z = (hoveredPoint.lat - centerLat) * (Math.PI / 180) * R * -1;
+        const y = hoveredPoint.alt !== null ? (hoveredPoint.alt - minAlt) : 0;
+        return [x, y, z];
+    }, [hoveredPoint, telemetryData, minAlt]);
+
+    const handlePointerMove = (e) => {
+        e.stopPropagation();
+        let minDist = Infinity;
+        let closestIdx = -1;
+        
+        for (let i = 0; i < points.length; i++) {
+            const dx = points[i][0] - e.point.x;
+            const dy = points[i][1] - e.point.y;
+            const dz = points[i][2] - e.point.z;
+            const distSq = dx*dx + dy*dy + dz*dz;
+            
+            if (distSq < minDist) {
+                minDist = distSq;
+                closestIdx = i;
+            }
+        }
+        
+        if (closestIdx !== -1) {
+            setHoveredPoint(telemetryData[closestIdx]);
+        }
+    };
+
+    return (
+        <Canvas camera={{ position: [0, 100, 200], fov: 55 }} style={{ background: '#0f172a', borderRadius: '8px' }}>
+            <ambientLight intensity={0.8} />
+            <directionalLight position={[100, 200, 50]} intensity={1.5} />
+            <OrbitControls makeDefault />
+            
+            <Grid infiniteGrid fadeDistance={10000} sectionColor="#334155" cellColor="#1e293b" position={[0, -0.1, 0]} />
+            
+            <Bounds fit clip margin={1.2}>
+                <group>
+                    {points.length > 1 && (
+                        <ThreeLine 
+                            points={points} 
+                            color="#3b82f6" 
+                            lineWidth={4} 
+                            onPointerMove={handlePointerMove}
+                            onPointerOut={() => setHoveredPoint(null)}
+                        />
+                    )}
+                    
+                    {telemetryData.map((dp, i) => {
+                        if (pointErrorTimes.has(dp.time)) {
+                            return (
+                                <Sphere key={`anomaly3d-${i}`} args={[2, 16, 16]} position={points[i]}>
+                                    <meshStandardMaterial color="#ef4444" emissive="#ef4444" emissiveIntensity={0.8} />
+                                </Sphere>
+                            );
+                        }
+                        return null;
+                    })}
+                </group>
+            </Bounds>
+
+            {hoveredPos && (
+                <Sphere args={[4, 16, 16]} position={hoveredPos}>
+                    <meshStandardMaterial color="#eab308" emissive="#eab308" emissiveIntensity={0.5} />
+                    <Html distanceFactor={100} center>
+                        {/* Оновлений 3D Tooltip з новими даними */}
+                        <div style={{ background: 'rgba(0,0,0,0.85)', color: '#fff', padding: '6px 10px', borderRadius: '8px', fontSize: '12px', border: '1px solid #eab308', whiteSpace: 'nowrap', pointerEvents: 'none', transform: 'translateY(-40px)' }}>
+                            <strong>Alt:</strong> {hoveredPoint.alt?.toFixed(1)}m<br/>
+                            <strong>Spd:</strong> {hoveredPoint.speed?.toFixed(1)}m/s<br/>
+                            {hoveredPoint.zSpeed !== null && hoveredPoint.zSpeed !== undefined && <><strong style={{color: '#0ea5e9'}}>zSpd:</strong> {hoveredPoint.zSpeed?.toFixed(1)}m/s<br/></>}
+                            {hoveredPoint.throttle !== null && hoveredPoint.throttle !== undefined && <><strong style={{color: '#8b5cf6'}}>Thr:</strong> {hoveredPoint.throttle?.toFixed(0)}%<br/></>}
+                            <strong>Bat:</strong> {hoveredPoint.batteryPercent !== null && hoveredPoint.batteryPercent !== undefined ? `${hoveredPoint.batteryPercent.toFixed(0)}%` : `${hoveredPoint.battery?.toFixed(1)}V`}
+                        </div>
+                    </Html>
+                </Sphere>
+            )}
+        </Canvas>
+    );
+};
+
 const MetricChart = ({ metric, data, hoveredPoint, setHoveredPoint, isPdfMode }) => {
     const [isExpanded, setIsExpanded] = useState(true);
-    const [showTable, setShowTable] = useState(false);
     const chartRef = useRef(null);
 
-    useEffect(() => {
-        if (isPdfMode) { setIsExpanded(true); setShowTable(false); }
-    }, [isPdfMode]);
+    useEffect(() => { if (isPdfMode) setIsExpanded(true); }, [isPdfMode]);
 
     useEffect(() => {
         const chart = chartRef.current;
-        if (chart && !showTable && data.length > 0) {
+        if (chart && data.length > 0) {
             if (hoveredPoint) {
                 const index = data.findIndex(d => d.time === hoveredPoint.time);
                 if (index !== -1) {
@@ -107,24 +220,17 @@ const MetricChart = ({ metric, data, hoveredPoint, setHoveredPoint, isPdfMode })
                     chart.tooltip.setActiveElements([{ datasetIndex: 0, index }], { x: chart.scales.x.getPixelForTick(index), y: chart.scales.y.getPixelForValue(hoveredPoint[metric.key]) });
                 }
             } else {
-                chart.setActiveElements([]);
-                chart.tooltip.setActiveElements([], { x: 0, y: 0 });
+                chart.setActiveElements([]); chart.tooltip.setActiveElements([], { x: 0, y: 0 });
             }
             chart.update('none');
         }
-    }, [hoveredPoint, data, showTable, metric.key]);
+    }, [hoveredPoint, data, metric.key]);
 
     const chartData = {
         labels: data.map(d => `${d.time}s`),
         datasets: [{
-            label: `${metric.label} (${metric.unit})`,
-            data: data.map(d => d[metric.key]),
-            borderColor: metric.color,
-            backgroundColor: `${metric.color}33`,
-            fill: true,
-            tension: 0.1,
-            pointRadius: 0,
-            pointHoverRadius: 5
+            label: `${metric.label} (${metric.unit})`, data: data.map(d => d[metric.key]),
+            borderColor: metric.color, backgroundColor: `${metric.color}33`, fill: true, tension: 0.1, pointRadius: 0, pointHoverRadius: 5
         }]
     };
 
@@ -134,89 +240,32 @@ const MetricChart = ({ metric, data, hoveredPoint, setHoveredPoint, isPdfMode })
             if (hoveredPoint) {
                 const index = data.findIndex(d => d.time === hoveredPoint.time);
                 if (index === -1) return;
-                const ctx = chart.ctx;
-                const x = chart.scales.x.getPixelForTick(index);
-                ctx.save();
-                ctx.beginPath();
-                ctx.moveTo(x, chart.chartArea.top);
-                ctx.lineTo(x, chart.chartArea.bottom);
-                ctx.lineWidth = 2;
-                ctx.strokeStyle = '#94a3b8';
-                ctx.setLineDash([5, 5]);
-                ctx.stroke();
-                ctx.restore();
+                const ctx = chart.ctx; const x = chart.scales.x.getPixelForTick(index);
+                ctx.save(); ctx.beginPath(); ctx.moveTo(x, chart.chartArea.top); ctx.lineTo(x, chart.chartArea.bottom);
+                ctx.lineWidth = 2; ctx.strokeStyle = '#94a3b8'; ctx.setLineDash([5, 5]); ctx.stroke(); ctx.restore();
             }
         }
     }], [hoveredPoint, data]);
 
     const chartOptions = {
-        responsive: true, maintainAspectRatio: false, animation: !isPdfMode,
-        interaction: { mode: 'index', intersect: false },
+        responsive: true, maintainAspectRatio: false, animation: !isPdfMode, interaction: { mode: 'index', intersect: false },
         onHover: (e, activeElements) => {
             if (activeElements.length > 0) setHoveredPoint(data[activeElements[0].index]);
             else setHoveredPoint(null);
         },
-        plugins: {
-            legend: { display: false },
-            zoom: {
-                pan: { enabled: true, mode: 'x' },
-                zoom: { wheel: { enabled: true }, pinch: { enabled: true }, mode: 'x' }
-            }
-        },
-        scales: {
-            x: { ticks: { maxTicksLimit: 10 } },
-            y: { title: { display: true, text: `${metric.label} (${metric.unit})` } }
-        }
+        plugins: { legend: { display: false }, zoom: { pan: { enabled: true, mode: 'x' }, zoom: { wheel: { enabled: true }, pinch: { enabled: true }, mode: 'x' } } },
+        scales: { x: { ticks: { maxTicksLimit: 10 } }, y: { title: { display: true, text: `${metric.label} (${metric.unit})` } } }
     };
 
     return (
         <div className={isPdfMode ? "pdf-block" : ""} style={{ background: 'white', borderRadius: '12px', padding: '15px', border: '1px solid #e2e8f0', marginBottom: '15px', boxShadow: '0 1px 3px rgba(0,0,0,0.05)' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <h4 style={{ margin: 0, display: 'flex', alignItems: 'center', gap: '8px', color: metric.color }}>
-                    {metric.icon} {metric.label}
-                </h4>
-                <div style={{ display: 'flex', gap: '10px' }}>
-                    <button 
-                        onClick={() => setShowTable(!showTable)} 
-                        style={{ padding: '4px 10px', borderRadius: '6px', cursor: 'pointer', fontSize: '12px', fontWeight: '600', display: 'flex', alignItems: 'center', gap: '5px', background: showTable ? '#3b82f6' : '#f1f5f9', color: showTable ? 'white' : '#475569', border: '1px solid #cbd5e1' }}
-                    >
-                        {showTable ? <BarChart2 size={14}/> : <List size={14}/>}
-                        {showTable ? 'View Chart' : 'View Data'}
-                    </button>
-                    <button onClick={() => setIsExpanded(!isExpanded)} style={{ background:'none', border:'none', cursor:'pointer', color: '#64748b' }}>
-                        {isExpanded ? <ChevronUp size={18}/> : <ChevronDown size={18}/>}
-                    </button>
-                </div>
+                <h4 style={{ margin: 0, display: 'flex', alignItems: 'center', gap: '8px', color: metric.color }}>{metric.icon} {metric.label}</h4>
+                <button onClick={() => setIsExpanded(!isExpanded)} style={{ background:'none', border:'none', cursor:'pointer', color: '#64748b' }}>
+                    {isExpanded ? <ChevronUp size={18}/> : <ChevronDown size={18}/>}
+                </button>
             </div>
-            
-            {isExpanded && (
-                <div style={{ marginTop: '15px' }}>
-                    {showTable ? (
-                        <div style={{ maxHeight: '250px', overflowY: 'auto', border: '1px solid #e2e8f0', borderRadius: '8px' }}>
-                            <table style={{ width: '100%', fontSize: '12px', textAlign: 'left', borderCollapse: 'collapse' }}>
-                                <thead style={{ position: 'sticky', top: 0, background: '#f8fafc', boxShadow: '0 1px 2px rgba(0,0,0,0.1)' }}>
-                                    <tr>
-                                        <th style={{ padding: '10px 12px', color: '#475569' }}>Time (s)</th>
-                                        <th style={{ padding: '10px 12px', color: metric.color }}>{metric.label} ({metric.unit})</th>
-                                    </tr>
-                                </thead>
-                                <tbody>
-                                    {data.map((row, i) => (
-                                        <tr key={i} style={{ borderBottom: '1px solid #f1f5f9' }}>
-                                            <td style={{ padding: '8px 12px', color: '#64748b' }}>{row.time}</td>
-                                            <td style={{ padding: '8px 12px', fontWeight: '500' }}>{row[metric.key] !== null ? row[metric.key].toFixed(2) : '-'}</td>
-                                        </tr>
-                                    ))}
-                                </tbody>
-                            </table>
-                        </div>
-                    ) : (
-                        <div style={{ height: '220px', position: 'relative' }}>
-                            <Line ref={chartRef} data={chartData} options={chartOptions} plugins={customCrosshair} />
-                        </div>
-                    )}
-                </div>
-            )}
+            {isExpanded && ( <div style={{ marginTop: '15px' }}><div style={{ height: '220px', position: 'relative' }}><Line ref={chartRef} data={chartData} options={chartOptions} plugins={customCrosshair} /></div></div> )}
         </div>
     );
 };
@@ -233,11 +282,14 @@ function Logbook({ profile }) {
     const [showTips, setShowTips] = useState(false); 
     const [hoveredPoint, setHoveredPoint] = useState(null);
     const [mapBounds, setMapBounds] = useState(null);
+    
+    const [logSearchQuery, setLogSearchQuery] = useState('');
+
     const [showPlanned, setShowPlanned] = useState(true);
     const [showActual, setShowActual] = useState(true);
     const [showAnomalies, setShowAnomalies] = useState(true);
+    const [viewMode, setViewMode] = useState('2d'); 
     
-    // СТАН ІСТОРИЧНОЇ ПОГОДИ
     const [flightWeather, setFlightWeather] = useState(null);
     const [showWeatherOverlay, setShowWeatherOverlay] = useState(false);
 
@@ -251,7 +303,6 @@ function Logbook({ profile }) {
     const [isPdfMode, setIsPdfMode] = useState(false);
 
     const [isReportOpen, setIsReportOpen] = useState(true);
-    const [isChartOpen, setIsChartOpen] = useState(true);
     const [isHistoryOpen, setIsHistoryOpen] = useState(true);
 
     const location = useLocation();
@@ -260,9 +311,7 @@ function Logbook({ profile }) {
     const filterMissionId = searchParams.get('mission');
     const filterDroneId = searchParams.get('drone');
 
-    useEffect(() => {
-        if (profile?.company_id) { fetchMissions(); fetchLogs(); }
-    }, [profile]);
+    useEffect(() => { if (profile?.company_id) { fetchMissions(); fetchLogs(); } }, [profile]);
 
     useEffect(() => {
         if (filterMissionId && savedMissions.length > 0) {
@@ -298,10 +347,8 @@ function Logbook({ profile }) {
     const handleMissionSelect = (e) => {
         const mission = savedMissions.find(m => m.id === parseInt(e.target.value));
         setSelectedMission(mission || null);
-        if (mission) setLogName(`Analysis: ${mission.name}`); 
-        else setLogName('');
-        
-        setTelemetryData([]); setAnomalies([]); setActualFlightDistance(0); setActualFlightTime(0); setActualAnomaliesCount(0); setFlightWeather(null);
+        if (mission) setLogName(`Analysis: ${mission.name}`); else setLogName('');
+        setTelemetryData([]); setAnomalies([]); setActualFlightDistance(0); setActualFlightTime(0); setActualAnomaliesCount(0); setFlightWeather(null); setViewMode('2d');
     };
 
     const calculateDistanceSafely = (dataArray) => {
@@ -314,8 +361,7 @@ function Logbook({ profile }) {
 
     const formatTime = (seconds) => {
         if (!seconds) return "0s";
-        const m = Math.floor(seconds / 60); 
-        const s = Math.round(seconds % 60);
+        const m = Math.floor(seconds / 60); const s = Math.round(seconds % 60);
         return `${m > 0 ? m + 'm ' : ''}${s}s`;
     };
 
@@ -333,114 +379,69 @@ function Logbook({ profile }) {
         return null;
     };
 
-    // ФУНКЦІЯ ОТРИМАННЯ ІСТОРИЧНОЇ ПОГОДИ ЗА ДАТОЮ ПОЛЬОТУ
     const fetchHistoricalWeather = async (lat, lng, dateString) => {
         try {
             const targetDate = new Date(dateString || Date.now());
-            const today = new Date();
-            const diffDays = (today - targetDate) / (1000 * 60 * 60 * 24);
+            const today = new Date(); const diffDays = (today - targetDate) / (1000 * 60 * 60 * 24);
             const isHistorical = diffDays > 5;
-            
-            const baseUrl = isHistorical 
-                ? 'https://archive-api.open-meteo.com/v1/archive' 
-                : 'https://api.open-meteo.com/v1/forecast';
-
-            const year = targetDate.getFullYear();
-            const month = String(targetDate.getMonth() + 1).padStart(2, '0');
-            const day = String(targetDate.getDate()).padStart(2, '0');
+            const baseUrl = isHistorical ? 'https://archive-api.open-meteo.com/v1/archive' : 'https://api.open-meteo.com/v1/forecast';
+            const year = targetDate.getFullYear(); const month = String(targetDate.getMonth() + 1).padStart(2, '0'); const day = String(targetDate.getDate()).padStart(2, '0');
             const formattedDate = `${year}-${month}-${day}`;
-            
             const hour = targetDate.getHours() || 12;
-
             const res = await fetch(`${baseUrl}?latitude=${lat}&longitude=${lng}&start_date=${formattedDate}&end_date=${formattedDate}&hourly=temperature_2m,wind_speed_10m,wind_gusts_10m,precipitation&wind_speed_unit=ms&timezone=auto`);
             const data = await res.json();
-
             if (data && data.hourly) {
-                setFlightWeather({
-                    temp: data.hourly.temperature_2m[hour] ?? data.hourly.temperature_2m[0],
-                    wind: data.hourly.wind_speed_10m[hour] ?? data.hourly.wind_speed_10m[0],
-                    gusts: data.hourly.wind_gusts_10m[hour] ?? data.hourly.wind_gusts_10m[0],
-                    rain: data.hourly.precipitation[hour] ?? data.hourly.precipitation[0],
-                    date: targetDate.toLocaleString('en-GB')
-                });
+                setFlightWeather({ temp: data.hourly.temperature_2m[hour] ?? data.hourly.temperature_2m[0], wind: data.hourly.wind_speed_10m[hour] ?? data.hourly.wind_speed_10m[0], gusts: data.hourly.wind_gusts_10m[hour] ?? data.hourly.wind_gusts_10m[0], rain: data.hourly.precipitation[hour] ?? data.hourly.precipitation[0], date: targetDate.toLocaleString('en-GB') });
             }
-        } catch (e) {
-            console.error("Historical weather fetch failed", e);
-        }
+        } catch (e) { console.error("Historical weather fetch failed", e); }
     };
 
     const handleFileUpload = (event) => {
-        const file = event.target.files[0];
-        if (!file) return;
-        
+        const file = event.target.files[0]; if (!file) return;
         Papa.parse(file, {
             header: true, dynamicTyping: true, skipEmptyLines: 'greedy', 
             complete: (results) => {
-                
                 let realFlightDate = new Date(file.lastModified); 
                 const firstRow = results.data[0];
                 if (firstRow) {
                     const dateKey = Object.keys(firstRow).find(k => k.toLowerCase().includes('datetime') || k.toLowerCase().includes('utc') || k.toLowerCase() === 'date');
-                    if (dateKey && firstRow[dateKey]) {
-                        const parsedDate = new Date(firstRow[dateKey]);
-                        if (!isNaN(parsedDate.getTime())) realFlightDate = parsedDate;
-                    }
+                    if (dateKey && firstRow[dateKey]) { const parsedDate = new Date(firstRow[dateKey]); if (!isNaN(parsedDate.getTime())) realFlightDate = parsedDate; }
                 }
+                const normalizedData = results.data.map((row, index) => {
+                    const latKey = ALIASES.lat.find(k => row[k] !== undefined && row[k] !== null && row[k] !== '');
+                    const lngKey = ALIASES.lng.find(k => row[k] !== undefined && row[k] !== null && row[k] !== '');
+                    if (!latKey || !lngKey) return null; 
+                    let cleanLat = typeof row[latKey] === 'string' ? parseFloat(row[latKey].replace(',', '.')) : parseFloat(row[latKey]);
+                    let cleanLng = typeof row[lngKey] === 'string' ? parseFloat(row[lngKey].replace(',', '.')) : parseFloat(row[lngKey]);
+                    if (isNaN(cleanLat) || isNaN(cleanLng)) return null;
 
-                const normalizedData = results.data
-                    .map((row, index) => {
-                        const latKey = ALIASES.lat.find(k => row[k] !== undefined && row[k] !== null && row[k] !== '');
-                        const lngKey = ALIASES.lng.find(k => row[k] !== undefined && row[k] !== null && row[k] !== '');
-                        
-                        if (!latKey || !lngKey) return null; 
-
-                        let cleanLat = typeof row[latKey] === 'string' ? parseFloat(row[latKey].replace(',', '.')) : parseFloat(row[latKey]);
-                        let cleanLng = typeof row[lngKey] === 'string' ? parseFloat(row[lngKey].replace(',', '.')) : parseFloat(row[lngKey]);
-                        if (isNaN(cleanLat) || isNaN(cleanLng)) return null;
-
-                        let parsedTime = index; 
-                        const timeKey = ALIASES.time.find(k => row[k] !== undefined && row[k] !== null && row[k] !== '');
-                        if (timeKey) {
-                            let t = parseFloat(row[timeKey]);
-                            if (!isNaN(t)) {
-                                if (timeKey.toLowerCase().includes('ms') || timeKey.toLowerCase().includes('millisecond')) parsedTime = t / 1000;
-                                else parsedTime = t;
-                            }
-                        }
-
-                        return {
-                            time: parsedTime, 
-                            lat: cleanLat, 
-                            lng: cleanLng,
-                            alt: extractMetric(row, ALIASES.alt, true, false), 
-                            speed: extractMetric(row, ALIASES.speed, false, true), 
-                            battery: extractMetric(row, ALIASES.battery), 
-                            satellites: extractMetric(row, ALIASES.satellites),
-                            pitch: extractMetric(row, ALIASES.pitch),
-                            roll: extractMetric(row, ALIASES.roll),
-                            yaw: extractMetric(row, ALIASES.yaw),
-                            temperature: extractMetric(row, ALIASES.temperature, false, false, true),
-                            current: extractMetric(row, ALIASES.current)
-                        };
-                    })
-                    .filter(row => row !== null && (Math.abs(row.lat) > 0.00001 || Math.abs(row.lng) > 0.00001)); 
+                    let parsedTime = index; const timeKey = ALIASES.time.find(k => row[k] !== undefined && row[k] !== null && row[k] !== '');
+                    if (timeKey) { let t = parseFloat(row[timeKey]); if (!isNaN(t)) { if (timeKey.toLowerCase().includes('ms') || timeKey.toLowerCase().includes('millisecond')) parsedTime = t / 1000; else parsedTime = t; } }
+                    return {
+                        time: parsedTime, lat: cleanLat, lng: cleanLng, 
+                        alt: extractMetric(row, ALIASES.alt, true, false), 
+                        speed: extractMetric(row, ALIASES.speed, false, true), 
+                        zSpeed: extractMetric(row, ALIASES.zSpeed, false, true),
+                        windSpeed: extractMetric(row, ALIASES.windSpeed, false, true),
+                        throttle: extractMetric(row, ALIASES.throttle),
+                        batteryPercent: extractMetric(row, ALIASES.batteryPercent),
+                        battery: extractMetric(row, ALIASES.battery), 
+                        satellites: extractMetric(row, ALIASES.satellites), 
+                        pitch: extractMetric(row, ALIASES.pitch), 
+                        roll: extractMetric(row, ALIASES.roll), 
+                        yaw: extractMetric(row, ALIASES.yaw), 
+                        temperature: extractMetric(row, ALIASES.temperature, false, false, true), 
+                        current: extractMetric(row, ALIASES.current)
+                    };
+                }).filter(row => row !== null && (Math.abs(row.lat) > 0.00001 || Math.abs(row.lng) > 0.00001)); 
                 
-                if (normalizedData.length === 0) {
-                    alert("No valid GPS data found in this log. Ensure it contains Latitude and Longitude columns, and values are not 0,0.");
-                    return;
-                }
-
+                if (normalizedData.length === 0) { alert("No valid GPS data found in this log."); return; }
                 normalizedData[0].absolute_date = realFlightDate.toISOString();
-
                 const calculatedDist = calculateDistanceSafely(normalizedData);
                 const detectedErrs = runAnomalyDetector(normalizedData, selectedMission?.waypoints, selectedMission?.drones);
                 const fTime = normalizedData.length > 1 ? (normalizedData[normalizedData.length - 1].time - normalizedData[0].time) : 0;
                 
-                setActualFlightDistance(calculatedDist);
-                setActualFlightTime(fTime > 0 ? fTime : normalizedData.length);
-                setActualAnomaliesCount(detectedErrs.length);
-                setTelemetryData(normalizedData);
-
+                setActualFlightDistance(calculatedDist); setActualFlightTime(fTime > 0 ? fTime : normalizedData.length); setActualAnomaliesCount(detectedErrs.length); setTelemetryData(normalizedData);
                 fetchHistoricalWeather(normalizedData[0].lat, normalizedData[0].lng, realFlightDate.toISOString());
             }
         });
@@ -449,32 +450,18 @@ function Logbook({ profile }) {
     const saveLogToDB = async () => {
         if (!selectedMission || telemetryData.length === 0) return;
         setIsSavingLog(true);
-        const { error } = await supabase.from('flight_logs').insert([{ 
-            mission_id: selectedMission.id, drone_id: selectedMission.drone_id, 
-            name: logName || 'Unnamed Analysis', telemetry_data: telemetryData, 
-            actual_distance: actualFlightDistance, 
-            flight_time: actualFlightTime, 
-            anomalies_count: actualAnomaliesCount,
-            company_id: profile.company_id 
-        }]);
+        const { error } = await supabase.from('flight_logs').insert([{ mission_id: selectedMission.id, drone_id: selectedMission.drone_id, name: logName || 'Unnamed Analysis', telemetry_data: telemetryData, actual_distance: actualFlightDistance, flight_time: actualFlightTime, anomalies_count: actualAnomaliesCount, company_id: profile.company_id }]);
         setIsSavingLog(false);
-        if (error) alert('Error: ' + error.message);
-        else { alert('Analysis Saved Successfully!'); setLogName(`Analysis: ${selectedMission.name}`); fetchLogs(); }
+        if (error) alert('Error: ' + error.message); else { alert('Analysis Saved Successfully!'); setLogName(`Analysis: ${selectedMission.name}`); fetchLogs(); }
     };
 
     const loadLogFromDB = async (log) => {
         const mission = savedMissions.find(m => m.id === log.mission_id);
-        setSelectedMission(mission || null); 
-        setLogName(log.name); 
-        
-        const validData = (log.telemetry_data || []).map(dp => ({
-            ...dp, lat: parseFloat(dp.lat), lng: parseFloat(dp.lng)
-        }));
+        setSelectedMission(mission || null); setLogName(log.name); 
+        const validData = (log.telemetry_data || []).map(dp => ({ ...dp, lat: parseFloat(dp.lat), lng: parseFloat(dp.lng) }));
         setTelemetryData(validData); 
         
-        let dist = log.actual_distance || 0;
-        let time = log.flight_time || 0;
-        
+        let dist = log.actual_distance || 0; let time = log.flight_time || 0;
         const detectedErrs = runAnomalyDetector(validData, mission?.waypoints, mission?.drones);
         let aCount = log.anomalies_count;
         
@@ -482,74 +469,36 @@ function Logbook({ profile }) {
         if (dist === 0 && validData.length > 1) { dist = calculateDistanceSafely(validData); needsDbHeal = true; }
         if (time === 0 && validData.length > 1) { time = validData[validData.length - 1].time - validData[0].time; if(time <= 0) time = validData.length; needsDbHeal = true; }
         if (aCount !== detectedErrs.length) { aCount = detectedErrs.length; needsDbHeal = true; }
+        if (needsDbHeal) await supabase.from('flight_logs').update({ actual_distance: dist, flight_time: time, anomalies_count: aCount }).eq('id', log.id);
         
-        if (needsDbHeal) {
-            await supabase.from('flight_logs').update({ actual_distance: dist, flight_time: time, anomalies_count: aCount }).eq('id', log.id);
-        }
-        
-        setActualFlightDistance(dist);
-        setActualFlightTime(time);
-        setActualAnomaliesCount(aCount);
-        setIsReportOpen(true); setIsChartOpen(true);
-
-        if (validData.length > 0) {
-            const flightDate = validData[0]?.absolute_date || log.created_at;
-            fetchHistoricalWeather(validData[0].lat, validData[0].lng, flightDate);
-        }
+        setActualFlightDistance(dist); setActualFlightTime(time); setActualAnomaliesCount(aCount); setIsReportOpen(true);
+        if (validData.length > 0) fetchHistoricalWeather(validData[0].lat, validData[0].lng, validData[0]?.absolute_date || log.created_at);
+        setViewMode('2d');
     };
 
     const deleteLogFromDB = async (id) => {
         if (!window.confirm('Are you sure you want to delete this analysis log?')) return;
         const { error } = await supabase.from('flight_logs').delete().eq('id', id);
-        if (error) alert('Error deleting log: ' + error.message);
-        else fetchLogs();
+        if (error) alert('Error deleting log: ' + error.message); else fetchLogs();
     };
 
     const handleExportPDF = async (e) => {
-        e.stopPropagation();
-        setIsExporting(true); 
-        setIsPdfMode(true); 
-        
-        setTimeout(() => {
-            window.dispatchEvent(new Event('resize')); 
+        e.stopPropagation(); setIsExporting(true); setIsPdfMode(true); 
+        setTimeout(() => { window.dispatchEvent(new Event('resize')); 
             setTimeout(async () => {
                 try {
-                    const pdf = new jsPDF('p', 'mm', 'a4');
-                    const pdfWidth = pdf.internal.pageSize.getWidth();
-                    const pdfHeight = pdf.internal.pageSize.getHeight();
-                    
-                    const marginX = 10;
-                    const maxImgWidth = pdfWidth - (marginX * 2);
-                    let currentY = 10; 
-                    let isFirstPage = true;
-
+                    const pdf = new jsPDF('p', 'mm', 'a4'); const pdfWidth = pdf.internal.pageSize.getWidth(); const pdfHeight = pdf.internal.pageSize.getHeight();
+                    const marginX = 10; const maxImgWidth = pdfWidth - (marginX * 2); let currentY = 10; let isFirstPage = true;
                     const blocks = document.querySelectorAll('.pdf-block');
-
                     for (let i = 0; i < blocks.length; i++) {
-                        const block = blocks[i];
-                        const canvas = await html2canvas(block, { scale: 2, useCORS: true });
-                        const imgData = canvas.toDataURL('image/png');
-                        const imgHeight = (canvas.height * maxImgWidth) / canvas.width;
-
-                        if (currentY + imgHeight > pdfHeight - 10 && !isFirstPage) {
-                            pdf.addPage();
-                            currentY = 10; 
-                        }
-                        
-                        pdf.addImage(imgData, 'PNG', marginX, currentY, maxImgWidth, imgHeight);
-                        currentY += imgHeight + 5; 
-                        isFirstPage = false;
+                        const canvas = await html2canvas(blocks[i], { scale: 2, useCORS: true });
+                        const imgData = canvas.toDataURL('image/png'); const imgHeight = (canvas.height * maxImgWidth) / canvas.width;
+                        if (currentY + imgHeight > pdfHeight - 10 && !isFirstPage) { pdf.addPage(); currentY = 10; }
+                        pdf.addImage(imgData, 'PNG', marginX, currentY, maxImgWidth, imgHeight); currentY += imgHeight + 5; isFirstPage = false;
                     }
-
                     pdf.save(`${logName || 'flight-report'}.pdf`);
-                } catch (error) {
-                    console.error("PDF Export failed:", error); 
-                    alert("Failed to generate PDF. Make sure all maps and charts are loaded.");
-                }
-                
-                setIsPdfMode(false); 
-                setIsExporting(false);
-                setTimeout(() => window.dispatchEvent(new Event('resize')), 100);
+                } catch (error) { alert("Failed to generate PDF."); }
+                setIsPdfMode(false); setIsExporting(false); setTimeout(() => window.dispatchEvent(new Event('resize')), 100);
             }, 1500); 
         }, 100);
     };
@@ -570,71 +519,58 @@ function Logbook({ profile }) {
         }
 
         factData.forEach((point, index) => {
-            let isPointError = false;
-            
-            const speedLimit = droneData?.max_speed || 18;
-
+            let isPointError = false; const speedLimit = droneData?.max_speed || 18;
             if (point.battery !== null && point.battery < 10.5) { detectedAnomalies.push({ time: point.time, text: `Time ${point.time}s: CRITICAL BATTERY DROP (${point.battery.toFixed(1)}V)`, type: 'battery' }); types.add('battery'); isPointError = true; }
             if (point.satellites !== null && point.satellites < 8) { detectedAnomalies.push({ time: point.time, text: `Time ${point.time}s: Weak GPS Signal (${point.satellites} sats)`, type: 'gps' }); types.add('gps'); isPointError = true; }
+            if (point.speed !== null && point.speed > speedLimit) { detectedAnomalies.push({ time: point.time, text: `Time ${point.time}s: Overspeeding (${point.speed.toFixed(1)} m/s, Limit: ${speedLimit})`, type: 'speed' }); types.add('speed'); isPointError = true; } 
             
-            if (point.speed !== null && point.speed > speedLimit) { 
-                detectedAnomalies.push({ time: point.time, text: `Time ${point.time}s: Overspeeding (${point.speed.toFixed(1)} m/s, Limit: ${speedLimit})`, type: 'speed' }); 
-                types.add('speed'); 
-                isPointError = true; 
-            } 
+            if (point.zSpeed !== null && point.zSpeed < -4.0) { detectedAnomalies.push({ time: point.time, text: `Time ${point.time}s: Rapid Descent (${point.zSpeed.toFixed(1)} m/s). Risk of VRS!`, type: 'zspeed' }); types.add('zspeed'); isPointError = true; } 
             
+            if (point.throttle !== null && point.throttle >= 95) { detectedAnomalies.push({ time: point.time, text: `Time ${point.time}s: High Motor Load (Throttle ${point.throttle}%). Possible high wind or overload.`, type: 'throttle' }); types.add('throttle'); isPointError = true; }
+
             if (droneData && droneData.max_flight_time) { const maxTimeSeconds = droneData.max_flight_time * 60; if (point.time > maxTimeSeconds) { detectedAnomalies.push({ time: point.time, text: `Time ${point.time}s: Exceeded max flight time of ${droneData.max_flight_time}m`, type: 'time' }); types.add('time'); isPointError = true; } }
             if (isPointError) pTimes.add(point.time);
             
             if (planData && planData.length >= 2) {
                 if (index >= missionStartIndex && index <= missionEndIndex) {
                     let minDistance = Infinity;
-                    for (let i = 0; i < planData.length - 1; i++) { 
-                        const dist = distanceToSegment(point, planData[i], planData[i+1]); 
-                        if (dist < minDistance) minDistance = dist; 
-                    }
-                    if (minDistance > 10) { 
-                        detectedAnomalies.push({ time: point.time, text: `Time ${point.time}s: Off-course by ${minDistance.toFixed(1)}m`, type: 'course' }); 
-                        types.add('course'); 
-                        cTimes.add(point.time); 
-                    }
+                    for (let i = 0; i < planData.length - 1; i++) { const dist = distanceToSegment(point, planData[i], planData[i+1]); if (dist < minDistance) minDistance = dist; }
+                    if (minDistance > 10) { detectedAnomalies.push({ time: point.time, text: `Time ${point.time}s: Off-course by ${minDistance.toFixed(1)}m`, type: 'course' }); types.add('course'); cTimes.add(point.time); }
                 }
             }
         });
-        
         const uniqueAnomalies = detectedAnomalies.filter((v, i, a) => a.findIndex(t => (t.text === v.text)) === i);
         setAnomalies(uniqueAnomalies); setCourseErrorTimes(cTimes); setPointErrorTimes(pTimes); setAnomalyTypes(types);
         return uniqueAnomalies;
     };
 
     const activeMetrics = METRICS.filter(m => telemetryData.some(d => d[m.key] !== null && d[m.key] !== undefined));
-
+    
     let displayedLogs = savedLogs;
     if (filterDroneId) displayedLogs = displayedLogs.filter(l => String(l.drone_id) === filterDroneId);
     if (filterMissionId) displayedLogs = displayedLogs.filter(l => String(l.mission_id) === filterMissionId);
+    if (logSearchQuery) {
+        displayedLogs = displayedLogs.filter(l => 
+            (l.name && l.name.toLowerCase().includes(logSearchQuery.toLowerCase())) ||
+            (l.missions?.name && l.missions.name.toLowerCase().includes(logSearchQuery.toLowerCase()))
+        );
+    }
 
     if (!profile) return null;
 
     return (
         <div style={{ display: 'flex', flexDirection: 'column', gap: '20px', height: 'calc(100vh - 80px)', position: 'relative' }}>
             
-            {/* ОНОВЛЕНІ ПЕРСОНАЛІЗОВАНІ ТА ПОГОДНІ ПОРАДИ */}
             {showTips && !isPdfMode && ( 
                 <div style={modalOverlayStyle}>
                     <div style={modalContentStyle}>
                         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid #e2e8f0', paddingBottom: '10px', marginBottom: '15px' }}>
-                            <h2 style={{ margin: 0, display: 'flex', alignItems: 'center', gap: '10px' }}>
-                                <Lightbulb color="#f59e0b" /> Intelligent Analysis & Recommendations
-                            </h2>
+                            <h2 style={{ margin: 0, display: 'flex', alignItems: 'center', gap: '10px' }}><Lightbulb color="#f59e0b" /> Intelligent Analysis & Recommendations</h2>
                             <button onClick={() => setShowTips(false)} style={{ background: 'none', border: 'none', cursor: 'pointer' }}><X size={24} color="#64748b" /></button>
                         </div>
-                        {anomalyTypes.size === 0 ? ( 
-                            <p>No critical issues detected in this flight log. The flight was successful.</p> 
-                        ) : ( 
+                        {anomalyTypes.size === 0 ? ( <p>No critical issues detected in this flight log. The flight was successful.</p> ) : ( 
                             <div style={{ display: 'flex', flexDirection: 'column', gap: '15px' }}>
-                                <p style={{ margin: 0, color: '#475569' }}>
-                                    Based on the telemetry data, historical weather conditions, and the specific hardware limits of <strong>{selectedMission?.drones?.name || 'this drone'}</strong>, we recommend reviewing the following systems:
-                                </p>
+                                <p style={{ margin: 0, color: '#475569' }}>Based on the telemetry data and the specific hardware limits of <strong>{selectedMission?.drones?.name || 'this drone'}</strong>, we recommend reviewing the following systems:</p>
                                 {Array.from(anomalyTypes).map(type => ( 
                                     <div key={type} style={{ background: '#f8fafc', padding: '15px', borderRadius: '8px', borderLeft: '4px solid #f59e0b', fontSize: '14px', lineHeight: '1.5' }}>
                                         <strong>{type.toUpperCase()}:</strong> {getDynamicAdvice(type, selectedMission?.drones, flightWeather)}
@@ -656,7 +592,6 @@ function Logbook({ profile }) {
                         </select>
                         {selectedMission?.drones && ( <div style={{ marginTop: '8px', fontSize: '12px', color: '#64748b', display: 'flex', alignItems: 'center', gap: '5px' }}><Target size={14} color="#10b981"/> <strong>Assigned Fleet:</strong> {selectedMission.drones.name} ({selectedMission.drones.model}) | Max Time: {selectedMission.drones.max_flight_time}m</div> )}
                     </div>
-
                     <div style={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
                         <h3 style={{ margin: '0 0 10px 0', display: 'flex', alignItems: 'center', gap: '8px', fontSize: '16px' }}><Upload size={20}/> 2. Upload Flight Log (CSV)</h3>
                         <input type="file" accept=".csv" onChange={handleFileUpload} disabled={!selectedMission} style={{ ...inputStyle, padding: '5px', cursor: selectedMission ? 'pointer' : 'not-allowed', background: !selectedMission ? '#f1f5f9' : 'white' }} />
@@ -671,108 +606,110 @@ function Logbook({ profile }) {
             )}
 
             <div id="logbook-report" style={
-                isPdfMode ? {
-                    width: '1000px', background: 'white', padding: '40px', position: 'absolute', top: 0, left: 0, zIndex: 99999, display: 'flex', flexDirection: 'column', gap: '20px'
-                } : {
-                    display: 'flex', gap: '20px', flex: 1, minHeight: 0, background: '#f8fafc', padding: '10px', borderRadius: '12px'
-                }
+                isPdfMode ? { width: '1000px', background: 'white', padding: '40px', position: 'absolute', top: 0, left: 0, zIndex: 99999, display: 'flex', flexDirection: 'column', gap: '20px' } 
+                          : { display: 'flex', gap: '20px', flex: 1, minHeight: 0, background: '#f8fafc', padding: '10px', borderRadius: '12px' }
             }>
                 {isPdfMode && (
-    <div className="pdf-block" style={{ borderBottom: '2px solid #e2e8f0', paddingBottom: '15px' }}>
-        <h1 style={{ margin: '0 0 10px 0', color: '#0f172a' }}>Flight Analysis Report</h1>
-        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '14px', color: '#475569' }}>
-            
-            {/* Ліва колонка: Базова інформація */}
-            <div style={{ flex: 1 }}>
-                <strong>Analysis Name:</strong> {logName || 'Unnamed Analysis'}<br/>
-                <strong>Date Generated:</strong> {new Date().toLocaleString('en-GB')}<br/>
-                {selectedMission?.drones && (<><strong>Assigned Fleet:</strong> {selectedMission.drones.name} ({selectedMission.drones.model})</>)}
-            </div>
-
-            {/* Центральна колонка: Історична погода */}
-            <div style={{ flex: 1, borderLeft: '1px solid #e2e8f0', borderRight: '1px solid #e2e8f0', padding: '0 15px', margin: '0 15px' }}>
-                {flightWeather ? (
-                    <>
-                        <strong style={{ display: 'flex', alignItems: 'center', gap: '4px' }}><Cloud size={14}/> Flight Weather ({flightWeather.date})</strong>
-                        <div style={{ marginTop: '4px', display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '4px', fontSize: '13px' }}>
-                            <span><Thermometer size={12} style={{ display: 'inline' }}/> {flightWeather.temp}°C</span>
-                            <span><CloudRain size={12} style={{ display: 'inline', color: '#3b82f6' }}/> {flightWeather.rain} mm</span>
-                            <span><Wind size={12} style={{ display: 'inline' }}/> {flightWeather.wind} m/s</span>
-                            <span>Gusts: <strong style={{ color: '#ef4444' }}>{flightWeather.gusts} m/s</strong></span>
+                    <div className="pdf-block" style={{ borderBottom: '2px solid #e2e8f0', paddingBottom: '15px' }}>
+                        <h1 style={{ margin: '0 0 10px 0', color: '#0f172a' }}>Flight Analysis Report</h1>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '14px', color: '#475569' }}>
+                            <div style={{ flex: 1 }}>
+                                <strong>Analysis Name:</strong> {logName || 'Unnamed Analysis'}<br/>
+                                <strong>Date Generated:</strong> {new Date().toLocaleString('en-GB')}<br/>
+                                {selectedMission?.drones && (<><strong>Assigned Fleet:</strong> {selectedMission.drones.name} ({selectedMission.drones.model})</>)}
+                            </div>
+                            <div style={{ flex: 1, borderLeft: '1px solid #e2e8f0', borderRight: '1px solid #e2e8f0', padding: '0 15px', margin: '0 15px' }}>
+                                {flightWeather ? (
+                                    <>
+                                        <strong style={{ display: 'flex', alignItems: 'center', gap: '4px' }}><Cloud size={14}/> Flight Weather ({flightWeather.date})</strong>
+                                        <div style={{ marginTop: '4px', display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '4px', fontSize: '13px' }}>
+                                            <span><Thermometer size={12} style={{ display: 'inline' }}/> {flightWeather.temp}°C</span>
+                                            <span><CloudRain size={12} style={{ display: 'inline', color: '#3b82f6' }}/> {flightWeather.rain} mm</span>
+                                            <span><Wind size={12} style={{ display: 'inline' }}/> {flightWeather.wind} m/s</span>
+                                            <span>Gusts: <strong style={{ color: '#ef4444' }}>{flightWeather.gusts} m/s</strong></span>
+                                        </div>
+                                    </>
+                                ) : ( <strong>No weather data available for this flight.</strong> )}
+                            </div>
+                            <div style={{ flex: 1, textAlign: 'right' }}>
+                                <strong>Flown Distance:</strong> {(actualFlightDistance / 1000).toFixed(2)} km<br/>
+                                <strong>Flight Time:</strong> {formatTime(actualFlightTime)}<br/>
+                                <strong>Issues Detected:</strong> <span style={{ color: actualAnomaliesCount > 0 ? '#ef4444' : '#10b981', fontWeight: 'bold' }}>{actualAnomaliesCount}</span>
+                            </div>
                         </div>
-                    </>
-                ) : (
-                    <strong>No weather data available for this flight.</strong>
+                    </div>
                 )}
-            </div>
 
-            {/* Права колонка: Статистика */}
-            <div style={{ flex: 1, textAlign: 'right' }}>
-                <strong>Flown Distance:</strong> {(actualFlightDistance / 1000).toFixed(2)} km<br/>
-                <strong>Flight Time:</strong> {formatTime(actualFlightTime)}<br/>
-                <strong>Issues Detected:</strong> <span style={{ color: actualAnomaliesCount > 0 ? '#ef4444' : '#10b981', fontWeight: 'bold' }}>{actualAnomaliesCount}</span>
-            </div>
-
-        </div>
-    </div>
-)}
-
-                <div className={isPdfMode ? "pdf-block" : ""} style={{
-                    flex: isPdfMode ? 'none' : 1.5,
-                    height: isPdfMode ? '450px' : 'auto', 
-                    background: 'white', borderRadius: '12px', padding: '15px', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)', display: 'flex', flexDirection: 'column', position: 'relative'
-                }}>
-                    <h3 style={{ margin: '0 0 10px 0', display: 'flex', alignItems: 'center', gap: '8px', fontSize: '16px' }}><MapIcon size={20}/> Flight Path Overlay</h3>
+                <div className={isPdfMode ? "pdf-block" : ""} style={{ flex: isPdfMode ? 'none' : 1.5, height: isPdfMode ? '450px' : 'auto', background: 'white', borderRadius: '12px', padding: '15px', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)', display: 'flex', flexDirection: 'column', position: 'relative' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
+                        <h3 style={{ margin: 0, display: 'flex', alignItems: 'center', gap: '8px', fontSize: '16px' }}>
+                            {viewMode === '2d' ? <MapIcon size={20}/> : <Box size={20}/>} Flight Path Overlay
+                        </h3>
+                        
+                        {!isPdfMode && telemetryData.length > 0 && (
+                            <div style={{ display: 'flex', background: '#f1f5f9', padding: '4px', borderRadius: '8px', border: '1px solid #e2e8f0' }}>
+                                <button 
+                                    onClick={() => setViewMode('2d')} 
+                                    style={{ ...toggleBtnStyle, background: viewMode === '2d' ? 'white' : 'transparent', boxShadow: viewMode === '2d' ? '0 1px 3px rgba(0,0,0,0.1)' : 'none', color: viewMode === '2d' ? '#3b82f6' : '#64748b' }}
+                                >
+                                    <MapIcon size={14} /> 2D Map
+                                </button>
+                                <button 
+                                    onClick={() => setViewMode('3d')} 
+                                    style={{ ...toggleBtnStyle, background: viewMode === '3d' ? '#0f172a' : 'transparent', boxShadow: viewMode === '3d' ? '0 1px 3px rgba(0,0,0,0.3)' : 'none', color: viewMode === '3d' ? 'white' : '#64748b' }}
+                                >
+                                    <Box size={14} /> 3D View
+                                </button>
+                            </div>
+                        )}
+                    </div>
                     
-                    {!isPdfMode && ( <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}><div style={{ display: 'flex', gap: '15px', fontSize: '13px', fontWeight: 'bold' }}><div onClick={() => setShowPlanned(!showPlanned)} style={{ display: 'flex', alignItems: 'center', gap: '4px', color: '#3b82f6', cursor: 'pointer', opacity: showPlanned ? 1 : 0.4, transition: 'opacity 0.2s' }}>{showPlanned ? <Eye size={16}/> : <EyeOff size={16}/>} ─── Planned</div><div onClick={() => setShowActual(!showActual)} style={{ display: 'flex', alignItems: 'center', gap: '4px', color: '#fca5a5', cursor: 'pointer', opacity: showActual ? 1 : 0.4, transition: 'opacity 0.2s' }}>{showActual ? <Eye size={16}/> : <EyeOff size={16}/>} - - - Actual</div><div onClick={() => setShowAnomalies(!showAnomalies)} style={{ display: 'flex', alignItems: 'center', gap: '4px', color: '#991b1b', cursor: 'pointer', opacity: showAnomalies ? 1 : 0.4, transition: 'opacity 0.2s' }}>{showAnomalies ? <Eye size={16}/> : <EyeOff size={16}/>} ───/● Anomalies</div></div></div> )}
+                    {!isPdfMode && viewMode === '2d' && ( 
+                        <div style={{ display: 'flex', gap: '15px', fontSize: '13px', fontWeight: 'bold', marginBottom: '10px' }}>
+                            <div onClick={() => setShowPlanned(!showPlanned)} style={{ display: 'flex', alignItems: 'center', gap: '4px', color: '#3b82f6', cursor: 'pointer', opacity: showPlanned ? 1 : 0.4 }}>{showPlanned ? <Eye size={16}/> : <EyeOff size={16}/>} ─── Planned</div>
+                            <div onClick={() => setShowActual(!showActual)} style={{ display: 'flex', alignItems: 'center', gap: '4px', color: '#fca5a5', cursor: 'pointer', opacity: showActual ? 1 : 0.4 }}>{showActual ? <Eye size={16}/> : <EyeOff size={16}/>} - - - Actual</div>
+                            <div onClick={() => setShowAnomalies(!showAnomalies)} style={{ display: 'flex', alignItems: 'center', gap: '4px', color: '#991b1b', cursor: 'pointer', opacity: showAnomalies ? 1 : 0.4 }}>{showAnomalies ? <Eye size={16}/> : <EyeOff size={16}/>} ───/● Anomalies</div>
+                        </div> 
+                    )}
                     
                     <div style={{ flex: 1, borderRadius: '8px', overflow: 'hidden', border: '1px solid #e2e8f0', position: 'relative' }}>
                         
-                        {/* ВІДЖЕТ ПОГОДИ (ПО ЦЕНТРУ ВГОРІ) */}
-                        {!isPdfMode && telemetryData.length > 0 && (
+                        {!isPdfMode && telemetryData.length > 0 && viewMode === '2d' && (
                             <div style={{ position: 'absolute', top: '15px', left: '50%', transform: 'translateX(-50%)', zIndex: 1000, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '10px', pointerEvents: 'none' }}>
-                                <button 
-                                    onClick={(e) => { e.preventDefault(); setShowWeatherOverlay(!showWeatherOverlay); }}
-                                    style={{ ...buttonStyle, background: showWeatherOverlay ? '#3b82f6' : 'white', color: showWeatherOverlay ? 'white' : '#475569', border: '2px solid rgba(0,0,0,0.2)', display: 'flex', alignItems: 'center', gap: '8px', padding: '6px 12px', pointerEvents: 'auto', boxShadow: '0 1px 5px rgba(0,0,0,0.65)' }}
-                                >
-                                    <Cloud size={16} /> Historic Weather
-                                </button>
-                                
+                                <button onClick={(e) => { e.preventDefault(); setShowWeatherOverlay(!showWeatherOverlay); }} style={{ ...buttonStyle, background: showWeatherOverlay ? '#3b82f6' : 'white', color: showWeatherOverlay ? 'white' : '#475569', border: '2px solid rgba(0,0,0,0.2)', display: 'flex', alignItems: 'center', gap: '8px', padding: '6px 12px', pointerEvents: 'auto', boxShadow: '0 1px 5px rgba(0,0,0,0.65)' }}><Cloud size={16} /> Historic Weather</button>
                                 {showWeatherOverlay && flightWeather && (
                                     <div style={weatherWidgetStyle}>
-                                        <h4 style={{ margin: '0 0 10px 0', borderBottom: '1px solid #e2e8f0', paddingBottom: '5px', color: '#0f172a', display: 'flex', justifyContent: 'space-between' }}>
-                                            Flight Conditions <Activity size={14} color="#3b82f6"/>
-                                        </h4>
+                                        <h4 style={{ margin: '0 0 10px 0', borderBottom: '1px solid #e2e8f0', paddingBottom: '5px', color: '#0f172a', display: 'flex', justifyContent: 'space-between' }}>Flight Conditions <Activity size={14} color="#3b82f6"/></h4>
                                         <div style={{ fontSize: '10px', color: '#94a3b8', marginBottom: '8px', textAlign: 'center' }}>For: {flightWeather.date}</div>
                                         <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', fontSize: '13px', color: '#475569' }}>
                                             <div style={{ display: 'flex', justifyContent: 'space-between' }}><span><Thermometer size={14} style={{ display: 'inline', verticalAlign: 'middle', marginRight: '4px' }}/> Temp:</span> <strong>{flightWeather.temp}°C</strong></div>
                                             <div style={{ display: 'flex', justifyContent: 'space-between' }}><span><Wind size={14} style={{ display: 'inline', verticalAlign: 'middle', marginRight: '4px' }}/> Wind:</span> <strong>{flightWeather.wind} m/s</strong></div>
-                                            <div style={{ display: 'flex', justifyContent: 'space-between' }}><span><Wind size={14} style={{ display: 'inline', verticalAlign: 'middle', marginRight: '4px', color: '#ef4444' }}/> Gusts:</span> <strong style={{ color: '#ef4444' }}>{flightWeather.gusts} m/s</strong></div>
-                                            <div style={{ display: 'flex', justifyContent: 'space-between' }}><span><CloudRain size={14} style={{ display: 'inline', verticalAlign: 'middle', marginRight: '4px', color: '#3b82f6' }}/> Rain:</span> <strong>{flightWeather.rain} mm</strong></div>
+                                            <div style={{ display: 'flex', justifyContent: 'space-between' }}><span><Wind size={14} style={{ display: 'inline', verticalAlign: 'middle', marginRight: '4px', color: '#ef4444' }}/> Gusts:</span> <strong style={{ color: '#ef4444' }}>{currentWeather.wind_gusts_10m} m/s</strong></div>
+                                            <div style={{ display: 'flex', justifyContent: 'space-between' }}><span><CloudRain size={14} style={{ display: 'inline', verticalAlign: 'middle', marginRight: '4px', color: '#3b82f6' }}/> Rain:</span> <strong>{flightWeather.precipitation} mm</strong></div>
                                         </div>
                                     </div>
                                 )}
                             </div>
                         )}
 
-                        <MapContainer preferCanvas={true} center={[51.5300, 31.3100]} zoom={14} style={{ height: '100%', width: '100%', zIndex: 1 }}>
-                            <LayersControl position="topright">
-                                <LayersControl.BaseLayer checked name="Standard Map">
-                                    <TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" maxZoom={22} />
-                                </LayersControl.BaseLayer>
-                                <LayersControl.BaseLayer name="Satellite">
-                                    <TileLayer url="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}" maxZoom={22} />
-                                </LayersControl.BaseLayer>
-                            </LayersControl>
+                        {viewMode === '2d' ? (
+                            <MapContainer preferCanvas={true} center={[51.5300, 31.3100]} zoom={14} style={{ height: '100%', width: '100%', zIndex: 1 }}>
+                                <LayersControl position="topright">
+                                    <LayersControl.BaseLayer checked name="Standard Map"><TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" maxZoom={22} /></LayersControl.BaseLayer>
+                                    <LayersControl.BaseLayer name="Satellite"><TileLayer url="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}" maxZoom={22} /></LayersControl.BaseLayer>
+                                </LayersControl>
+                                <MapController bounds={mapBounds} isPdfMode={isPdfMode} />
+                                {selectedMission && showPlanned && <Polyline positions={selectedMission.waypoints.map(wp => [wp.lat, wp.lng])} color="#3b82f6" weight={4} opacity={0.5} />}
+                                {showActual && telemetryData.length > 0 && <Polyline positions={telemetryData.map(dp => [dp.lat, dp.lng])} color="#fca5a5" weight={3} dashArray="8, 8" />}
+                                {showAnomalies && telemetryData.length > 0 && telemetryData.slice(0, -1).map((dp, i) => { const nextDp = telemetryData[i + 1]; if (courseErrorTimes.has(dp.time) || courseErrorTimes.has(nextDp.time)) return <Polyline key={`act-seg-${i}`} positions={[[dp.lat, dp.lng], [nextDp.lat, nextDp.lng]]} color="#991b1b" weight={5} />; return null; })}
+                                {showAnomalies && telemetryData.map((dp, i) => { if (pointErrorTimes.has(dp.time)) return <CircleMarker key={`anomaly-pt-${i}`} center={[dp.lat, dp.lng]} radius={5} pathOptions={{ color: '#991b1b', fillColor: '#ef4444', fillOpacity: 1, weight: 2 }} interactive={false} />; return null; })}
+                                {!isPdfMode && telemetryData.map((dp, i) => <CircleMarker key={`hitbox-${i}`} center={[dp.lat, dp.lng]} radius={12} opacity={0} fillOpacity={0} eventHandlers={{ mouseover: () => setHoveredPoint(dp), mouseout: () => setHoveredPoint(null) }} />)}
+                                {hoveredPoint && !isPdfMode && <CircleMarker center={[hoveredPoint.lat, hoveredPoint.lng]} radius={7} interactive={false} pathOptions={{ color: 'black', fillColor: '#eab308', fillOpacity: 1, weight: 2 }} />}
+                            </MapContainer>
+                        ) : (
+                            <Flight3DView telemetryData={telemetryData} hoveredPoint={hoveredPoint} setHoveredPoint={setHoveredPoint} pointErrorTimes={pointErrorTimes} />
+                        )}
 
-                            <MapController bounds={mapBounds} isPdfMode={isPdfMode} />
-                            {selectedMission && showPlanned && <Polyline positions={selectedMission.waypoints.map(wp => [wp.lat, wp.lng])} color="#3b82f6" weight={4} opacity={0.5} />}
-                            {showActual && telemetryData.length > 0 && <Polyline positions={telemetryData.map(dp => [dp.lat, dp.lng])} color="#fca5a5" weight={3} dashArray="8, 8" />}
-                            {showAnomalies && telemetryData.length > 0 && telemetryData.slice(0, -1).map((dp, i) => { const nextDp = telemetryData[i + 1]; if (courseErrorTimes.has(dp.time) || courseErrorTimes.has(nextDp.time)) return <Polyline key={`act-seg-${i}`} positions={[[dp.lat, dp.lng], [nextDp.lat, nextDp.lng]]} color="#991b1b" weight={5} />; return null; })}
-                            {showAnomalies && telemetryData.map((dp, i) => { if (pointErrorTimes.has(dp.time)) return <CircleMarker key={`anomaly-pt-${i}`} center={[dp.lat, dp.lng]} radius={5} pathOptions={{ color: '#991b1b', fillColor: '#ef4444', fillOpacity: 1, weight: 2 }} interactive={false} />; return null; })}
-                            {!isPdfMode && telemetryData.map((dp, i) => <CircleMarker key={`hitbox-${i}`} center={[dp.lat, dp.lng]} radius={12} opacity={0} fillOpacity={0} eventHandlers={{ mouseover: () => setHoveredPoint(dp), mouseout: () => setHoveredPoint(null) }} />)}
-                            {hoveredPoint && !isPdfMode && <CircleMarker center={[hoveredPoint.lat, hoveredPoint.lng]} radius={7} interactive={false} pathOptions={{ color: 'black', fillColor: '#eab308', fillOpacity: 1, weight: 2 }} />}
-                        </MapContainer>
                     </div>
                 </div>
 
@@ -788,10 +725,7 @@ function Logbook({ profile }) {
                                 {anomalyTypes.size === 0 ? ( <p style={{ color: '#854d0e', margin: 0, fontSize: '14px' }}>No recommendations required.</p> ) : ( <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', fontSize: '13px', color: '#854d0e' }}>{Array.from(anomalyTypes).map(type => ( <div key={type}><strong>{type.toUpperCase()}:</strong> {getDynamicAdvice(type, selectedMission?.drones, flightWeather)}</div> ))}</div> )}
                             </div>
                         </div>
-                        
-                        {activeMetrics.map(metric => (
-                            <MetricChart key={metric.key} metric={metric} data={telemetryData} hoveredPoint={hoveredPoint} setHoveredPoint={setHoveredPoint} isPdfMode={isPdfMode} />
-                        ))}
+                        {activeMetrics.map(metric => ( <MetricChart key={metric.key} metric={metric} data={telemetryData} hoveredPoint={hoveredPoint} setHoveredPoint={setHoveredPoint} isPdfMode={isPdfMode} /> ))}
                     </>
                 ) : (
                     <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: '15px', overflowY: 'auto', paddingRight: '5px' }}>
@@ -822,16 +756,22 @@ function Logbook({ profile }) {
                             </div>
                         )}
 
+                        {/* === ОНОВЛЕНИЙ LIVE TRACKER === */}
                         <div style={{ display: 'flex', justifyContent: 'space-between', background: hoveredPoint ? '#fefce8' : '#f8fafc', padding: '12px', borderRadius: '10px', border: '1px solid #e2e8f0', transition: 'all 0.2s' }}>
-                            <div style={{ fontSize: '13px', color: '#475569', fontWeight: 'bold' }}>
+                            <div style={{ fontSize: '13px', color: '#475569', fontWeight: 'bold', flexShrink: 0 }}>
                                 <Crosshair size={14} style={{ marginBottom: '-2px', marginRight: '4px' }}/> 
                                 {hoveredPoint ? `LIVE TRACKER: ${hoveredPoint.time}s` : 'Hover over map or chart to track point'}
                             </div>
                             {hoveredPoint && ( 
-                                <div style={{ fontSize: '13px', fontWeight: '600', display: 'flex', gap: '15px' }}>
+                                <div style={{ fontSize: '13px', fontWeight: '600', display: 'flex', gap: '15px', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
                                     <span style={{ color: '#3b82f6' }}>Alt: {hoveredPoint.alt !== null ? hoveredPoint.alt.toFixed(1) : '-'}m</span>
                                     <span style={{ color: '#f59e0b' }}>Spd: {hoveredPoint.speed !== null ? hoveredPoint.speed.toFixed(1) : '-'}m/s</span>
-                                    <span style={{ color: '#ef4444' }}>Bat: {hoveredPoint.battery !== null ? hoveredPoint.battery.toFixed(1) : '-'}V</span>
+                                    {hoveredPoint.zSpeed !== null && hoveredPoint.zSpeed !== undefined && <span style={{ color: '#0ea5e9' }}>zSpd: {hoveredPoint.zSpeed.toFixed(1)}m/s</span>}
+                                    {hoveredPoint.throttle !== null && hoveredPoint.throttle !== undefined && <span style={{ color: '#8b5cf6' }}>Thr: {hoveredPoint.throttle.toFixed(0)}%</span>}
+                                    {hoveredPoint.batteryPercent !== null && hoveredPoint.batteryPercent !== undefined
+                                        ? <span style={{ color: '#10b981' }}>Bat: {hoveredPoint.batteryPercent.toFixed(0)}%</span>
+                                        : (hoveredPoint.battery !== null && <span style={{ color: '#10b981' }}>Bat: {hoveredPoint.battery.toFixed(1)}V</span>)
+                                    }
                                 </div> 
                             )}
                         </div>
@@ -852,20 +792,14 @@ function Logbook({ profile }) {
                             {isReportOpen && ( <div style={{ marginTop: '15px' }}>{anomalies.length === 0 ? ( <p style={{ color: '#166534', margin: 0, fontSize: '14px' }}>Waiting for log data or no anomalies detected.</p> ) : ( <ul style={{ color: '#991b1b', margin: 0, paddingLeft: '20px', fontSize: '13px', lineHeight: '1.5', maxHeight: '200px', overflowY: 'auto', paddingRight: '10px' }}>{anomalies.map((a, i) => ( <li key={i} onMouseEnter={() => { const point = telemetryData.find(d => d.time === a.time); if (point) setHoveredPoint(point); }} onMouseLeave={() => setHoveredPoint(null)} style={{ marginBottom: '4px', background: hoveredPoint?.time === a.time ? '#fef08a' : 'transparent', transition: 'background 0.2s', cursor: 'pointer', padding: '2px 4px', borderRadius: '4px' }}>{a.text}</li> ))}</ul> )}</div> )}
                         </div>
 
-                        {/* Динамічні графіки */}
                         <div style={{ background: 'white', borderRadius: '12px', padding: '15px', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)' }}>
                             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '15px', borderBottom: '1px solid #e2e8f0', paddingBottom: '10px' }}>
                                 <h3 style={{ margin: 0, display: 'flex', alignItems: 'center', gap: '8px', fontSize: '16px' }}><Activity size={20}/> Telemetry Analysis (Interactive)</h3>
                             </div>
-                            
                             {telemetryData.length > 0 ? (
-                                activeMetrics.map(metric => (
-                                    <MetricChart key={metric.key} metric={metric} data={telemetryData} hoveredPoint={hoveredPoint} setHoveredPoint={setHoveredPoint} isPdfMode={isPdfMode} />
-                                ))
+                                activeMetrics.map(metric => ( <MetricChart key={metric.key} metric={metric} data={telemetryData} hoveredPoint={hoveredPoint} setHoveredPoint={setHoveredPoint} isPdfMode={isPdfMode} /> ))
                             ) : (
-                                <div style={{ height: '100px', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#94a3b8', fontSize: '14px', border: '1px dashed #cbd5e1', borderRadius: '8px' }}>
-                                    Upload a CSV log to view dynamic charts
-                                </div>
+                                <div style={{ height: '100px', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#94a3b8', fontSize: '14px', border: '1px dashed #cbd5e1', borderRadius: '8px' }}>Upload a CSV log to view dynamic charts</div>
                             )}
                         </div>
 
@@ -873,7 +807,19 @@ function Logbook({ profile }) {
                             <div style={{ background: 'white', borderRadius: '12px', padding: '15px', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)' }}>
                                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', cursor: 'pointer', borderBottom: isHistoryOpen ? '1px solid #e2e8f0' : 'none', paddingBottom: isHistoryOpen ? '10px' : '0', marginBottom: isHistoryOpen ? '15px' : '0' }} onClick={() => setIsHistoryOpen(!isHistoryOpen)}><h3 style={{ margin: 0, display: 'flex', alignItems: 'center', gap: '8px', fontSize: '16px' }}><FolderOpen size={20}/> Saved Analysis History</h3>{isHistoryOpen ? <ChevronUp size={20} color="#64748b"/> : <ChevronDown size={20} color="#64748b"/>}</div>
                                 {isHistoryOpen && (
-                                    <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', maxHeight: '300px', overflowY: 'auto', paddingRight: '5px' }}>
+                                    <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', maxHeight: '350px', overflowY: 'auto', paddingRight: '5px' }}>
+                                        
+                                        <div style={{ position: 'relative', marginBottom: '10px' }}>
+                                            <Search size={16} color="#94a3b8" style={{ position: 'absolute', left: '10px', top: '50%', transform: 'translateY(-50%)' }} />
+                                            <input 
+                                                type="text" 
+                                                placeholder="Search analysis by name or mission..." 
+                                                value={logSearchQuery}
+                                                onChange={(e) => setLogSearchQuery(e.target.value)}
+                                                style={{ ...inputStyle, width: '100%', paddingLeft: '32px', boxSizing: 'border-box' }}
+                                            />
+                                        </div>
+
                                         {displayedLogs.length === 0 ? <p style={{ fontSize: '13px', color: '#94a3b8' }}>No saved logs found.</p> : 
                                             displayedLogs.map((log) => (
                                                 <div key={log.id} style={waypointCardStyle}>
@@ -903,6 +849,7 @@ function Logbook({ profile }) {
 const inputStyle = { width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid #cbd5e1', fontSize: '14px', outline: 'none' };
 const buttonStyle = { padding: '10px 16px', color: 'white', border: 'none', borderRadius: '8px', cursor: 'pointer', fontWeight: '600', fontSize: '14px', transition: 'all 0.2s' };
 const miniButtonStyle = { padding: '4px 10px', background: '#3b82f6', color: 'white', border: 'none', borderRadius: '6px', cursor: 'pointer', fontSize: '12px', fontWeight: '600' };
+const toggleBtnStyle = { display: 'flex', alignItems: 'center', gap: '6px', border: 'none', padding: '6px 12px', borderRadius: '6px', cursor: 'pointer', fontSize: '12px', fontWeight: 'bold', transition: 'all 0.2s' };
 const waypointCardStyle = { display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 12px', background: '#f8fafc', borderRadius: '8px', border: '1px solid #e2e8f0' };
 const weatherWidgetStyle = { background: 'rgba(255, 255, 255, 0.95)', backdropFilter: 'blur(4px)', padding: '15px', borderRadius: '12px', boxShadow: '0 4px 15px rgba(0,0,0,0.1)', border: '1px solid #e2e8f0', width: '200px', pointerEvents: 'auto' };
 const modalOverlayStyle = { position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(15, 23, 42, 0.75)', backdropFilter: 'blur(4px)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 10000 };

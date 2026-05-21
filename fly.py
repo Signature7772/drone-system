@@ -1,8 +1,19 @@
 from pymavlink import mavutil
+import requests
 import time
 import glob
-import os
 import csv
+
+# === НАЛАШТУВАННЯ SUPABASE (IoT HTTP Broadcast) ===
+SUPABASE_URL = "https://pznbhnoszzpkoowziibh.supabase.co"
+SUPABASE_KEY = "sb_publishable_Pb5LcwUwkjJlNSDanCyVWw_gKLazFwN"
+BROADCAST_ENDPOINT = f"{SUPABASE_URL}/realtime/v1/api/broadcast"
+
+HEADERS = {
+    "apikey": SUPABASE_KEY,
+    "Authorization": f"Bearer {SUPABASE_KEY}",
+    "Content-Type": "application/json"
+}
 
 print("🔍 Шукаємо файл місії (.waypoints) у папці...")
 wp_files = glob.glob("*.waypoints")
@@ -19,7 +30,8 @@ master = mavutil.mavlink_connection('tcp:127.0.0.1:5762')
 master.wait_heartbeat()
 print("✅ З'єднання встановлено!")
 
-master.mav.request_data_stream_send(master.target_system, master.target_component, mavutil.mavlink.MAV_DATA_STREAM_ALL, 1, 1)
+# Запитуємо всі потоки даних з частотою 2 Гц
+master.mav.request_data_stream_send(master.target_system, master.target_component, mavutil.mavlink.MAV_DATA_STREAM_ALL, 2, 1)
 
 print("🛰 Очікування GPS-сигналу...")
 while True:
@@ -109,35 +121,71 @@ print("🎯 Перемикання в режим AUTO. Дрон летить п�
 master.mav.set_mode_send(master.target_system, mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED, 3)
 
 total_waypoints = len(commands)
-print("\n📡 Слідкуємо за місією та записуємо лог телеметрії...")
+print("\n📡 Слідкуємо за місією. Увімкнено LIVE-трансляцію (IoT) та запис логу...")
 
+# ДОДАНО НОВІ КОЛОНКИ: zSpeed (вертикальна швидкість), batteryPercent, throttle
 log_file = open("flight_log.csv", mode="w", newline="")
 log_writer = csv.writer(log_file)
-log_writer.writerow(["time", "lat", "lng", "alt", "speed", "battery", "satellites"])
+log_writer.writerow(["time", "lat", "lng", "alt", "speed", "zSpeed", "battery", "batteryPercent", "throttle", "satellites"])
 
 start_time = time.time()
-last_battery = 12.6
+last_battery_v = 12.6
+last_battery_pct = 100
 last_sats = 10
-mission_finished = False # Прапорець, щоб знати, коли місія виконана
+last_throttle = 0
+mission_finished = False
+
+last_telem_send = 0
 
 while True:
     msg = master.recv_match(blocking=True, timeout=1)
-    if not msg:
-        continue
+    if not msg: continue
         
     msg_type = msg.get_type()
     
     if msg_type == 'SYS_STATUS':
-        last_battery = msg.voltage_battery / 1000.0
+        last_battery_v = msg.voltage_battery / 1000.0
+        last_battery_pct = msg.battery_remaining if msg.battery_remaining != -1 else 100
     elif msg_type == 'GPS_RAW_INT':
         last_sats = msg.satellites_visible
+    elif msg_type == 'VFR_HUD':
+        last_throttle = msg.throttle
     elif msg_type == 'GLOBAL_POSITION_INT':
         current_time = round(time.time() - start_time, 1)
         lat = msg.lat / 1e7
         lng = msg.lon / 1e7
         alt = msg.relative_alt / 1000.0
         speed = ((msg.vx / 100.0)**2 + (msg.vy / 100.0)**2)**0.5
-        log_writer.writerow([current_time, lat, lng, alt, round(speed, 2), last_battery, last_sats])
+        z_speed = msg.vz / 100.0 # Вертикальна швидкість (м/с), негативна - підйом, позитивна - спуск
+        
+        # 1. ЗАПИСУЄМО ЛОКАЛЬНИЙ ЛОГ (З НОВИМИ ДАНИМИ)
+        log_writer.writerow([current_time, lat, lng, alt, round(speed, 2), round(z_speed, 2), last_battery_v, last_battery_pct, last_throttle, last_sats])
+        
+        # 2. ВІДПРАВЛЯЄМО LIVE-ТЕЛЕМЕТРІЮ ЧЕРЕЗ HTTP
+        if time.time() - last_telem_send >= 0.5:
+            try:
+                payload_data = {
+                    "messages": [{
+                        "topic": "drone_live_telemetry",
+                        "event": "live_data",
+                        "payload": {
+                            "time": current_time,
+                            "lat": lat,
+                            "lng": lng,
+                            "alt": alt,
+                            "speed": round(speed, 2),
+                            "zSpeed": round(z_speed, 2),
+                            "battery": last_battery_v,
+                            "batteryPercent": last_battery_pct,
+                            "throttle": last_throttle,
+                            "sats": last_sats
+                        }
+                    }]
+                }
+                requests.post(BROADCAST_ENDPOINT, headers=HEADERS, json=payload_data, timeout=1)
+                last_telem_send = time.time()
+            except Exception:
+                pass 
         
     elif msg_type == 'MISSION_CURRENT':
         current_wp = msg.seq
@@ -147,12 +195,11 @@ while True:
                 print("\n✅ Місію завершено! Повернення на базу (RTL)...")
                 mission_finished = True
 
-    # Якщо місія завершена, чекаємо моменту, коли дрон сяде і вимкне мотори
     elif msg_type == 'HEARTBEAT' and mission_finished:
         is_armed = msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED
         if not is_armed:
             print("🛬 Дрон успішно приземлився та вимкнув мотори.")
-            break # Тільки тепер зупиняємо запис логу
+            break 
 
 log_file.close()
-print("📁 Повний лог польоту (включно з посадкою) збережено у файл: flight_log.csv")
+print("📁 ПОВНИЙ лог польоту збережено у файл: flight_log.csv")

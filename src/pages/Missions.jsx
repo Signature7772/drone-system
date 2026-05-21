@@ -1,7 +1,12 @@
 import { useState, useMemo, useEffect, useCallback, useRef } from 'react';
 import { MapContainer, TileLayer, Marker, Popup, useMapEvents, Polyline, GeoJSON, useMap, LayersControl } from 'react-leaflet';
 import L from 'leaflet';
-import { Trash2, RotateCw, Database, FolderOpen, Download, AlertTriangle, Undo2, XCircle, Archive, ArchiveRestore, Calendar, Activity, ShieldAlert, Edit3, Clock, CloudRain, Wind, Cloud, Thermometer } from 'lucide-react';
+import { 
+    Trash2, RotateCw, Database, FolderOpen, Download, AlertTriangle, 
+    Undo2, XCircle, Archive, ArchiveRestore, Calendar, Activity, 
+    ShieldAlert, Edit3, Clock, CloudRain, Wind, Cloud, Thermometer,
+    Search, PlusCircle, X 
+} from 'lucide-react';
 import { supabase } from '../supabaseClient';
 import { useLocation, useNavigate } from 'react-router-dom';
 
@@ -25,16 +30,18 @@ function isPointInsidePolygon(point, polygon) {
     return inside;
 }
 
-// Безкоштовний погодний радар
+// === НАДІЙНИЙ МЕТЕОРАДАР ===
 function LiveRadarLayer() {
     const [radarUrl, setRadarUrl] = useState(null);
     useEffect(() => {
         fetch('https://api.rainviewer.com/public/weather-maps.json')
             .then(res => res.json())
             .then(data => {
+                // Використовуємо надійний radar array, але зі зміненою палітрою (color=2) для кращої видимості
                 if (data && data.radar && data.radar.past && data.radar.past.length > 0) {
                     const latest = data.radar.past[data.radar.past.length - 1];
-                    // Використовуємо 512 для кращої якості на ретині (опційно)
+                    // color=2: Universal Black/White/Gray scale
+                    // smooth=1: Smoothing enabled
                     setRadarUrl(`https://tilecache.rainviewer.com${latest.path}/256/{z}/{x}/{y}/2/1_1.png`);
                 }
             }).catch(e => console.error('Radar fetch failed', e));
@@ -45,12 +52,11 @@ function LiveRadarLayer() {
     return (
         <TileLayer 
             url={radarUrl} 
-            opacity={0.6} 
+            opacity={0.65} 
             zIndex={10} 
-            // КЛЮЧОВІ ПАРАМЕТРИ:
-            maxNativeZoom={7} // Більшість радарів RainViewer стабільні до 10-11 зуму
-            maxZoom={22}       // Дозволяє карті зумитись далі, розтягуючи шар
-            attribution="Weather data by RainViewer" 
+            maxNativeZoom={7} 
+            maxZoom={22} 
+            attribution="Global Weather Data by RainViewer" 
         />
     );
 }
@@ -64,11 +70,18 @@ function MapTracker({ setMapCenter }) {
     return null;
 }
 
+// === NFZ MANAGER (З ПЕРЕВІРКОЮ ЗУМУ) ===
 function NFZManager({ setDynamicNfz, setIsLoadingNfz }) {
     const map = useMap();
     const timeoutRef = useRef(null);
 
     const fetchZones = async () => {
+        // Запит виконується лише при зумі 8+
+        if (map.getZoom() < 8) {
+            setDynamicNfz({ type: "FeatureCollection", features: [] });
+            return;
+        }
+
         setIsLoadingNfz(true);
         const bounds = map.getBounds();
         const bbox = `${bounds.getSouth()},${bounds.getWest()},${bounds.getNorth()},${bounds.getEast()}`;
@@ -105,7 +118,7 @@ function NFZManager({ setDynamicNfz, setIsLoadingNfz }) {
             setDynamicNfz({ type: "FeatureCollection", features });
         } catch (error) { console.error("Failed to fetch NFZ from OpenStreetMap:", error); }
         setIsLoadingNfz(false);
-    };
+    }
 
     useEffect(() => { fetchZones(); }, []);
 
@@ -127,6 +140,7 @@ function Missions({ profile }) {
     const [drones, setDrones] = useState([]);
     const [selectedDroneId, setSelectedDroneId] = useState('');
     const [isLoading, setIsLoading] = useState(false);
+    const [searchQuery, setSearchQuery] = useState(''); 
 
     const [dynamicNfz, setDynamicNfz] = useState({ type: "FeatureCollection", features: [] });
     const [isLoadingNfz, setIsLoadingNfz] = useState(false);
@@ -144,6 +158,15 @@ function Missions({ profile }) {
     const isArchivedView = searchParams.get('tab') === 'archived';
     const [activeTab, setActiveTab] = useState(isArchivedView ? 'archived' : 'active');
 
+    const handleNewPlan = () => {
+        if (waypoints.length > 0 && !window.confirm("Discard current plan? All unsaved waypoints will be lost.")) return;
+        setWaypoints([]);
+        setHistory([]);
+        setEditingPoint(null);
+        setMissionName('New_Mission_Plan');
+    };
+
+    // === ПЕРЕВІРКА ПОГОДИ ===
     useEffect(() => {
         const checkWeather = async () => {
             const lat = waypoints.length > 0 ? waypoints[0].lat : mapCenter[0];
@@ -156,11 +179,13 @@ function Missions({ profile }) {
 
                 if (waypoints.length > 0 && selectedDroneId) {
                     const drone = drones.find(d => String(d.id) === String(selectedDroneId));
+                    // Ліміт вітру: 60% від максимальної швидкості дрона, або 10 м/с за замовчуванням
                     const safeWindLimit = drone && drone.max_speed ? (drone.max_speed * 0.6) : 10; 
 
                     const currentWind = data.current.wind_speed_10m;
                     const currentPrecip = data.current.precipitation;
 
+                    // Якщо вітер сильніший за ліміт АБО є опади
                     if (currentWind > safeWindLimit || currentPrecip > 0) {
                         const goodHourIdx = data.hourly.wind_speed_10m.findIndex((w, i) => w <= safeWindLimit && data.hourly.precipitation_probability[i] < 10);
                         let improvementText = goodHourIdx !== -1 
@@ -168,7 +193,8 @@ function Missions({ profile }) {
                             : `No improvement expected in next 24h.`;
 
                         setWeatherAlert({
-                            wind: currentWind, rain: currentPrecip > 0,
+                            wind: currentWind, 
+                            rain: currentPrecip > 0,
                             message: `Warning: Weather is currently unsafe for ${drone?.name || 'this drone'}. ${currentPrecip > 0 ? 'Precipitation detected.' : `Wind speed is ${currentWind} m/s (Safe limit: ${safeWindLimit.toFixed(1)} m/s).`} ${improvementText}`
                         });
                     } else { setWeatherAlert(null); }
@@ -223,7 +249,7 @@ function Missions({ profile }) {
     };
 
     const fetchDrones = async () => {
-        const { data: allDrones } = await supabase.from('drones').select('id, name, model, max_speed').order('name', { ascending: true });
+        const { data: allDrones } = await supabase.from('drones').select('id, name, model, max_speed, max_flight_time').order('name', { ascending: true });
         if (profile.role === 'admin') {
             setDrones(allDrones || []);
         } else {
@@ -234,6 +260,20 @@ function Missions({ profile }) {
             } else setDrones([]);
         }
     };
+
+    const { totalDistance, estimatedTime } = useMemo(() => {
+        let dist = 0; let time = 0;
+        for (let i = 0; i < waypoints.length - 1; i++) {
+            const d = L.latLng(waypoints[i].lat, waypoints[i].lng).distanceTo(L.latLng(waypoints[i + 1].lat, waypoints[i + 1].lng));
+            dist += d;
+            const speed = waypoints[i].speed > 0 ? waypoints[i].speed : 5; 
+            time += d / speed;
+        }
+        return { totalDistance: dist, estimatedTime: time };
+    }, [waypoints]);
+
+    const selectedDroneInfo = useMemo(() => drones.find(d => String(d.id) === String(selectedDroneId)), [drones, selectedDroneId]);
+    const isBatteryWarning = selectedDroneInfo?.max_flight_time && (estimatedTime / 60) > selectedDroneInfo.max_flight_time;
 
     const saveMissionToDB = async () => {
         if (waypoints.length === 0) return alert('Add at least one waypoint!');
@@ -264,17 +304,6 @@ function Missions({ profile }) {
         const { error } = await supabase.from('missions').update({ is_archived: false }).eq('id', id);
         if (!error) fetchMissions();
     };
-
-    const { totalDistance, estimatedTime } = useMemo(() => {
-        let dist = 0; let time = 0;
-        for (let i = 0; i < waypoints.length - 1; i++) {
-            const d = L.latLng(waypoints[i].lat, waypoints[i].lng).distanceTo(L.latLng(waypoints[i + 1].lat, waypoints[i + 1].lng));
-            dist += d;
-            const speed = waypoints[i].speed > 0 ? waypoints[i].speed : 5; 
-            time += d / speed;
-        }
-        return { totalDistance: dist, estimatedTime: time };
-    }, [waypoints]);
 
     const formatTime = (seconds) => {
         if (!seconds) return "0s";
@@ -338,6 +367,7 @@ function Missions({ profile }) {
 
     let displayedMissions = savedMissions.filter(m => activeTab === 'archived' ? m.is_archived : !m.is_archived);
     if (filterDroneId) displayedMissions = displayedMissions.filter(m => String(m.drone_id) === filterDroneId);
+    if (searchQuery) displayedMissions = displayedMissions.filter(m => m.name.toLowerCase().includes(searchQuery.toLowerCase()));
 
     if (!profile) return null;
 
@@ -345,7 +375,12 @@ function Missions({ profile }) {
         <div style={{ display: 'flex', gap: '20px', height: 'calc(100vh - 80px)' }}>
             <div style={{ flex: 2, display: 'flex', flexDirection: 'column' }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
-                    <h2 style={{ margin: 0 }}>Mission Planner</h2>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '15px' }}>
+                        <h2 style={{ margin: 0 }}>Mission Planner</h2>
+                        <button onClick={handleNewPlan} style={{ ...miniButtonStyle, background: '#10b981', display: 'flex', alignItems: 'center', gap: '5px' }}>
+                            <PlusCircle size={14} /> New Plan
+                        </button>
+                    </div>
                     <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
                         <button onClick={handleUndo} disabled={history.length === 0} style={{ ...buttonStyle, background: history.length === 0 ? '#cbd5e1' : '#64748b', display: 'flex', gap: '5px', padding: '10px', cursor: history.length === 0 ? 'not-allowed' : 'pointer' }} title="Undo (Ctrl+Z)"><Undo2 size={16} /> Undo</button>
                         <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
@@ -359,15 +394,22 @@ function Missions({ profile }) {
                                 {drones.map(d => <option key={d.id} value={d.id}>{d.name} ({d.model})</option>)}
                             </select>
                         </div>
-                        <button onClick={saveMissionToDB} disabled={isLoading || hasViolation} style={{ ...buttonStyle, background: hasViolation ? '#94a3b8' : '#3b82f6', display: 'flex', gap: '8px', marginTop: '16px', cursor: hasViolation ? 'not-allowed' : 'pointer' }}>
+                        <button onClick={saveMissionToDB} disabled={isLoading || hasViolation || isBatteryWarning} style={{ ...buttonStyle, background: (hasViolation || isBatteryWarning) ? '#94a3b8' : '#3b82f6', display: 'flex', gap: '8px', marginTop: '16px', cursor: (hasViolation || isBatteryWarning) ? 'not-allowed' : 'pointer' }}>
                             <Database size={16} /> {isLoading ? 'Saving...' : 'Save to DB'}
                         </button>
                     </div>
                 </div>
 
+                {/* === ЗОНА АЛЕРТІВ === */}
                 {hasViolation && (
                     <div style={{ background: '#fef2f2', border: '1px solid #ef4444', color: '#b91c1c', padding: '10px', borderRadius: '8px', marginBottom: '10px', display: 'flex', alignItems: 'center', gap: '10px', fontWeight: '600' }}>
                         <AlertTriangle size={20} /> Route Violation: The flight path intersects a Restricted Zone. Please adjust the route.
+                    </div>
+                )}
+
+                {isBatteryWarning && (
+                    <div style={{ background: '#fff7ed', border: '1px solid #f97316', color: '#9a3412', padding: '10px', borderRadius: '8px', marginBottom: '10px', display: 'flex', alignItems: 'center', gap: '10px', fontWeight: '600' }}>
+                        <AlertTriangle size={20} /> Warning: Estimated time ({Math.round(estimatedTime/60)} min) exceeds {selectedDroneInfo?.name}'s battery limit ({selectedDroneInfo?.max_flight_time} min).
                     </div>
                 )}
                 
@@ -380,7 +422,6 @@ function Missions({ profile }) {
 
                 <div style={{ flex: 1, background: 'white', borderRadius: '12px', padding: '10px', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)', position: 'relative' }}>
                     
-                    {/* КНОПКА ПОГОДИ: По центру вгорі */}
                     <div style={{ position: 'absolute', top: '15px', left: '50%', transform: 'translateX(-50%)', zIndex: 1000, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '10px', pointerEvents: 'none' }}>
                         <button 
                             onClick={(e) => { e.preventDefault(); setShowWeatherOverlay(!showWeatherOverlay); }}
@@ -405,7 +446,6 @@ function Missions({ profile }) {
                         )}
                     </div>
 
-                    {/* NFZ LOADING: Знизу ліворуч, щоб не перекривати зум */}
                     {isLoadingNfz && (
                         <div style={{ position: 'absolute', bottom: '20px', left: '20px', zIndex: 1000, background: 'white', padding: '8px 12px', borderRadius: '8px', fontSize: '13px', fontWeight: 'bold', color: '#3b82f6', display: 'flex', alignItems: 'center', gap: '8px', boxShadow: '0 2px 10px rgba(0,0,0,0.1)' }}>
                             <ShieldAlert size={16} className="animate-spin" /> Scanning Area for NFZ...
@@ -421,7 +461,8 @@ function Missions({ profile }) {
                                 <TileLayer url="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}" maxZoom={22} />
                             </LayersControl.BaseLayer>
                             
-                            <LayersControl.Overlay name="Live Rain Radar">
+                            {/* === ОСЬ КНОПКА ВКЛЮЧЕННЯ РАДАРУ === */}
+                            <LayersControl.Overlay name="Live Cloud Cover">
                                 <LiveRadarLayer />
                             </LayersControl.Overlay>
                         </LayersControl>
@@ -487,10 +528,35 @@ function Missions({ profile }) {
                     {waypoints.length >= 2 && <button onClick={makeCircular} style={{ ...buttonStyle, background: '#8b5cf6', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px', marginTop: '5px' }}><RotateCw size={16} /> Return to Start (Loop)</button>}
                 </div>
 
-                <div style={{ borderBottom: '1px solid #e2e8f0', paddingBottom: '10px', marginBottom: '15px' }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}><h3 style={{ margin: 0, fontSize: '16px', display: 'flex', alignItems: 'center', gap: '5px' }}><FolderOpen size={18} /> Database History</h3>{filterDroneId && ( <button onClick={() => navigate('/missions')} style={{...miniButtonStyle, background: '#64748b', display: 'flex', alignItems: 'center', gap: '4px'}}><XCircle size={12}/> Clear Filter</button> )}</div>
+                <div style={{ borderBottom: '1px solid #e2e8f0', paddingBottom: '15px', marginBottom: '15px' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '15px' }}>
+                        <h3 style={{ margin: 0, fontSize: '16px', display: 'flex', alignItems: 'center', gap: '5px' }}>
+                            <FolderOpen size={18} /> Database History
+                        </h3>
+                        {filterDroneId && ( <button onClick={() => navigate('/missions')} style={{...miniButtonStyle, background: '#64748b', display: 'flex', alignItems: 'center', gap: '4px'}}><XCircle size={12}/> Clear Filter</button> )}
+                    </div>
+
+                    <div style={{ position: 'relative', marginBottom: '15px' }}>
+                        <Search size={16} color="#94a3b8" style={{ position: 'absolute', left: '10px', top: '50%', transform: 'translateY(-50%)' }} />
+                        <input 
+                            type="text" 
+                            placeholder="Search missions..." 
+                            value={searchQuery}
+                            onChange={(e) => setSearchQuery(e.target.value)}
+                            style={{ ...inputStyle, width: '100%', paddingLeft: '32px', paddingRight: '32px', boxSizing: 'border-box' }}
+                        />
+                        {searchQuery && (
+                            <X 
+                                size={16} 
+                                color="#94a3b8" 
+                                style={{ position: 'absolute', right: '10px', top: '50%', transform: 'translateY(-50%)', cursor: 'pointer' }}
+                                onClick={() => setSearchQuery('')}
+                            />
+                        )}
+                    </div>
+
                     <div style={{ display: 'flex', gap: '10px' }}>
-                        <button onClick={() => setActiveTab('active')} style={{ flex: 1, padding: '8px', border: 'none', background: activeTab === 'active' ? '#10b981' : '#f1f5f9', color: activeTab === 'active' ? 'white' : '#64748b', borderRadius: '6px', fontWeight: 'bold', cursor: 'pointer', transition: 'all 0.2s' }}>Active Missions</button>
+                        <button onClick={() => setActiveTab('active')} style={{ flex: 1, padding: '8px', border: 'none', background: activeTab === 'active' ? '#10b981' : '#f1f5f9', color: activeTab === 'active' ? 'white' : '#64748b', borderRadius: '6px', fontWeight: 'bold', cursor: 'pointer', transition: 'all 0.2s' }}>Active</button>
                         <button onClick={() => setActiveTab('archived')} style={{ flex: 1, padding: '8px', border: 'none', background: activeTab === 'archived' ? '#64748b' : '#f1f5f9', color: activeTab === 'archived' ? 'white' : '#64748b', borderRadius: '6px', fontWeight: 'bold', cursor: 'pointer', transition: 'all 0.2s' }}>Archived</button>
                     </div>
                 </div>
