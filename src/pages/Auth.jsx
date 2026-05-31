@@ -1,8 +1,10 @@
+// Модуль автентифікації та реєстрації компанії
 import { useState, useEffect } from 'react';
 import { supabase } from '../supabaseClient';
 import { Mail, Lock, Building2, KeyRound, LogIn, UserPlus, LogOut, Target } from 'lucide-react';
 
 function Auth({ session }) {
+    // Стан компонента
     const [loading, setLoading] = useState(false);
     const [email, setEmail] = useState('');
     const [password, setPassword] = useState('');
@@ -31,6 +33,7 @@ function Auth({ session }) {
         }
     };
 
+    // Базова Авторизація
     const handleAuth = async (e) => {
         e.preventDefault();
         setLoading(true);
@@ -54,12 +57,15 @@ function Auth({ session }) {
         window.location.reload();
     };
 
+    // Створення компанії (Адміністратор)
     const handleCreateCompany = async (e) => {
         e.preventDefault();
         setLoading(true);
         
+        // 1. Генеруємо випадковий код із 6 символів
         const newJoinCode = Math.random().toString(36).substring(2, 8).toUpperCase();
         
+        // 2. Створюємо запис компанії в БД
         const { data: companyData, error: companyError } = await supabase
             .from('companies')
             .insert([{ name: companyName, join_code: newJoinCode }])
@@ -72,7 +78,7 @@ function Auth({ session }) {
             return;
         }
 
-        // ОНОВЛЕНО: Використовуємо upsert для гарантованого створення профілю
+        // 3. Зберігаємо профіль користувача як 'admin' цієї компанії
         const { error: profileError } = await supabase
             .from('profiles')
             .upsert({ 
@@ -90,10 +96,12 @@ function Auth({ session }) {
         setLoading(false);
     };
 
+    // Приєднання до компанії (Пілот)
     const handleJoinCompany = async (e) => {
         e.preventDefault();
         setLoading(true);
 
+        // 1. Шукаємо компанію за введеним кодом
         const { data: companyData, error: companyError } = await supabase
             .from('companies')
             .select('id, name')
@@ -106,7 +114,7 @@ function Auth({ session }) {
             return;
         }
 
-        // ОНОВЛЕНО: Використовуємо upsert
+        // 3. Зберігаємо профіль користувача як 'pilot' цієї компанії
         const { error: profileError } = await supabase
             .from('profiles')
             .upsert({ 
@@ -124,7 +132,7 @@ function Auth({ session }) {
         setLoading(false);
     };
 
-    // ОНОВЛЕНО: Більш надійна перевірка для Onboarding
+    // Екран онбордингу
     if (session && (!profile || !profile.company_id)) {
         return (
             <div style={pageContainerStyle}>
@@ -180,6 +188,7 @@ function Auth({ session }) {
         );
     }
 
+    // Екран логіну та реєстрації
     if (!session) {
         return (
             <div style={pageContainerStyle}>

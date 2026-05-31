@@ -1,10 +1,11 @@
+# Програмний IoT-агент
 from pymavlink import mavutil
 import requests
 import time
 import glob
 import csv
 
-# === НАЛАШТУВАННЯ SUPABASE (IoT HTTP Broadcast) ===
+# НАЛАШТУВАННЯ SUPABASE (IoT HTTP Broadcast)
 SUPABASE_URL = "https://pznbhnoszzpkoowziibh.supabase.co"
 SUPABASE_KEY = "sb_publishable_Pb5LcwUwkjJlNSDanCyVWw_gKLazFwN"
 BROADCAST_ENDPOINT = f"{SUPABASE_URL}/realtime/v1/api/broadcast"
@@ -15,33 +16,33 @@ HEADERS = {
     "Content-Type": "application/json"
 }
 
-print("🔍 Шукаємо файл місії (.waypoints) у папці...")
+print("Шукаємо файл місії (.waypoints) у папці...")
 wp_files = glob.glob("*.waypoints")
 
 if not wp_files:
-    print("❌ Помилка: У папці немає жодного файлу .waypoints!")
+    print("Помилка: У папці немає жодного файлу .waypoints!")
     exit()
 
 FILE_NAME = wp_files[0]
-print(f"✅ Знайдено файл: {FILE_NAME}")
+print(f"Знайдено файл: {FILE_NAME}")
 
-print("🔌 Підключення до дрона...")
+print("Підключення до дрона...")
 master = mavutil.mavlink_connection('tcp:127.0.0.1:5762')
 master.wait_heartbeat()
-print("✅ З'єднання встановлено!")
+print("З'єднання встановлено!")
 
 # Запитуємо всі потоки даних з частотою 2 Гц
 master.mav.request_data_stream_send(master.target_system, master.target_component, mavutil.mavlink.MAV_DATA_STREAM_ALL, 2, 1)
 
-print("🛰 Очікування GPS-сигналу...")
+print("Очікування GPS-сигналу...")
 while True:
     msg = master.recv_match(type='GPS_RAW_INT', blocking=True, timeout=2)
     if msg and msg.fix_type >= 3: 
-        print("✅ GPS сигнал стабільний (3D Fix)!")
+        print("GPS сигнал стабільний (3D Fix)!")
         break
     time.sleep(1)
 
-print("⏳ Вимикаємо перевірки безпеки (Arming Checks)...")
+print("Вимикаємо перевірки безпеки (Arming Checks)...")
 master.param_set_send("ARMING_CHECK", 0)
 time.sleep(1)
 
@@ -53,9 +54,9 @@ with open(FILE_NAME, "r") as f:
         if len(parts) >= 12:
             commands.append(parts)
 
-print(f"📂 Прочитано {len(commands)} команд з файлу.")
+print(f"Прочитано {len(commands)} команд з файлу.")
 
-print("🗑 Очищення та завантаження місії...")
+print("Очищення та завантаження місії...")
 master.mav.mission_clear_all_send(master.target_system, master.target_component)
 master.recv_match(type='MISSION_ACK', blocking=True)
 master.mav.mission_count_send(master.target_system, master.target_component, len(commands))
@@ -69,7 +70,7 @@ for i, cmd in enumerate(commands):
         master.mav.mission_item_int_send(master.target_system, master.target_component, i, int(cmd[2]), command_id, 0, 1, float(cmd[4]), float(cmd[5]), float(cmd[6]), float(cmd[7]), 0, 0, 0)
         
 master.recv_match(type='MISSION_ACK', blocking=True, timeout=3)
-print("✅ Місію успішно завантажено!")
+print("Місію успішно завантажено!")
 
 master.waypoint_set_current_send(1)
 time.sleep(0.5)
@@ -78,11 +79,11 @@ msg = master.recv_match(type='HEARTBEAT', blocking=True)
 is_armed = msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED
 
 if not is_armed:
-    print("🚀 Зміна режиму на GUIDED...")
+    print("Зміна режиму на керування комп'ютером GUIDED...")
     master.mav.set_mode_send(master.target_system, mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED, 4)
     time.sleep(1) 
 
-    print("🔥 ПРИМУСОВИЙ запуск моторів (Force Arming)...")
+    print("Запуск моторів (Force Arming)...")
     armed_successfully = False
     for attempt in range(5):
         master.mav.command_long_send(master.target_system, master.target_component, mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM, 0, 1, 21196, 0, 0, 0, 0, 0)
@@ -93,37 +94,36 @@ if not is_armed:
                 armed_successfully = True
                 break
         if armed_successfully:
-            print("✅ Мотори успішно заведені!")
+            print("Мотори успішно заведені!")
             break
         else:
-            print(f"⚠️ Спроба {attempt+1} не вдалася...")
+            print(f"!Спроба {attempt+1} не вдалася...")
     
     if not armed_successfully:
-        print("❌ Не вдалося завести мотори.")
+        print("Не вдалося завести мотори.")
         exit()
 
-    print("⏳ Очікування стабілізації моторів (3 сек)...")
+    print("Очікування стабілізації моторів (3 сек)...")
     time.sleep(3)
 
-    print("🚁 Відправка команди на зліт (15 метрів)...")
+    print("Відправка команди на зліт (15 метрів)...")
     master.mav.command_long_send(master.target_system, master.target_component, mavutil.mavlink.MAV_CMD_NAV_TAKEOFF, 0, 0, 0, 0, 0, 0, 0, 15)
     
-    print("⏳ Чекаємо набору висоти...")
+    print("Чекаємо набору висоти...")
     while True:
         msg = master.recv_match(type='GLOBAL_POSITION_INT', blocking=True, timeout=2)
         if msg and (msg.relative_alt / 1000.0) > 10.0:
-            print(f"⬆️ Висота набрана: {msg.relative_alt / 1000.0}м!")
+            print(f"Висота набрана: {msg.relative_alt / 1000.0}м!")
             break
         time.sleep(0.5)
 
-# === ЗАПУСК МІСІЇ ТА ЗАПИС ПОВНОГО ЛОГУ ===
-print("🎯 Перемикання в режим AUTO. Дрон летить по маршруту!")
+# ЗАПУСК МІСІЇ ТА ЗАПИС ПОВНОГО ЛОГУ
+print("Перемикання в режим AUTO. Дрон летить по маршруту!")
 master.mav.set_mode_send(master.target_system, mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED, 3)
 
 total_waypoints = len(commands)
-print("\n📡 Слідкуємо за місією. Увімкнено LIVE-трансляцію (IoT) та запис логу...")
+print("\n Слідкуємо за місією. Увімкнено LIVE-трансляцію (IoT) та запис логу...")
 
-# ДОДАНО НОВІ КОЛОНКИ: zSpeed (вертикальна швидкість), batteryPercent, throttle
 log_file = open("flight_log.csv", mode="w", newline="")
 log_writer = csv.writer(log_file)
 log_writer.writerow(["time", "lat", "lng", "alt", "speed", "zSpeed", "battery", "batteryPercent", "throttle", "satellites"])
@@ -158,7 +158,7 @@ while True:
         speed = ((msg.vx / 100.0)**2 + (msg.vy / 100.0)**2)**0.5
         z_speed = msg.vz / 100.0 # Вертикальна швидкість (м/с), негативна - підйом, позитивна - спуск
         
-        # 1. ЗАПИСУЄМО ЛОКАЛЬНИЙ ЛОГ (З НОВИМИ ДАНИМИ)
+        # 1. ЗАПИСУЄМО ЛОКАЛЬНИЙ ЛОГ
         log_writer.writerow([current_time, lat, lng, alt, round(speed, 2), round(z_speed, 2), last_battery_v, last_battery_pct, last_throttle, last_sats])
         
         # 2. ВІДПРАВЛЯЄМО LIVE-ТЕЛЕМЕТРІЮ ЧЕРЕЗ HTTP
@@ -190,16 +190,16 @@ while True:
     elif msg_type == 'MISSION_CURRENT':
         current_wp = msg.seq
         if not mission_finished:
-            print(f"✈️ Прямує до точки: {current_wp} / {total_waypoints - 1}", end='\r')
+            print(f"Прямує до точки: {current_wp} / {total_waypoints - 1}", end='\r')
             if current_wp >= total_waypoints - 1:
-                print("\n✅ Місію завершено! Повернення на базу (RTL)...")
+                print("\n Місію завершено! Повернення на базу (RTL)...")
                 mission_finished = True
 
     elif msg_type == 'HEARTBEAT' and mission_finished:
         is_armed = msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED
         if not is_armed:
-            print("🛬 Дрон успішно приземлився та вимкнув мотори.")
+            print("Дрон успішно приземлився та вимкнув мотори.")
             break 
 
 log_file.close()
-print("📁 ПОВНИЙ лог польоту збережено у файл: flight_log.csv")
+print("ПОВНИЙ лог польоту збережено у файл: flight_log.csv")

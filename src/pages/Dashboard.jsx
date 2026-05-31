@@ -1,3 +1,4 @@
+// Головна аналітична панель системи
 import { useState, useEffect, useMemo, useRef } from 'react';
 import { supabase } from '../supabaseClient';
 import { useNavigate } from 'react-router-dom';
@@ -16,11 +17,12 @@ import html2canvas from 'html2canvas';
 
 ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, Title, Tooltip, Legend, zoomPlugin);
 
-// === НОВИЙ ВІДЖЕТ IoT РЕАЛЬНОГО ЧАСУ ===
+// Віджет реального часу для телеметрії дрона
 const LiveTrackerWidget = () => {
     const [liveData, setLiveData] = useState(null);
     const [isOnline, setIsOnline] = useState(false);
 
+    // Підписуємося на канал Supabase для отримання телеметрії в реальному часі
     useEffect(() => {
         const channel = supabase.channel('drone_live_telemetry');
 
@@ -42,6 +44,7 @@ const LiveTrackerWidget = () => {
         };
     }, []);
 
+    // Рендеримо віджет з даними або повідомленням про відсутність з'єднання
     return (
         <div className="pdf-block" style={{ background: isOnline ? '#ecfdf5' : '#f8fafc', padding: '20px', borderRadius: '16px', border: isOnline ? '2px solid #34d399' : '1px solid #e2e8f0', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)', marginBottom: '20px', transition: 'all 0.3s' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '15px' }}>
@@ -82,7 +85,6 @@ const LiveTrackerWidget = () => {
         </div>
     );
 };
-// === КІНЕЦЬ ВІДЖЕТА IoT ===
 
 const DASHBOARD_METRICS = [
     { id: 'distance', label: 'Flown Distance', unit: 'km', color: '#f59e0b', icon: <Navigation size={16}/> },
@@ -189,11 +191,11 @@ function Dashboard({ profile }) {
     const navigate = useNavigate(); 
     const [timeRange, setTimeRange] = useState('week'); 
     
-    // === СТЕЙТ ДЛЯ ФІЛЬТРАЦІЇ ПО ДРОНУ ===
+    // Фільтрація за дроном (для адмінів - всі дрони, для пілотів - лише доступні)
     const [selectedDroneId, setSelectedDroneId] = useState('all');
     const [allAvailableDrones, setAllAvailableDrones] = useState([]);
     
-    // === ПОШУК ДЛЯ АВТОПАРКУ ===
+    // Пошук по флоту (для великих флотів)
     const [fleetSearchQuery, setFleetSearchQuery] = useState('');
 
     const [stats, setStats] = useState({
@@ -234,7 +236,7 @@ function Dashboard({ profile }) {
         return options;
     }, []);
 
-    // Завантажуємо базовий список дронів ОДИН раз при старті
+    // Завантажуємо базовий список дронів один раз при старті
     useEffect(() => {
         if (profile?.company_id) {
             fetchBaseDronesList();
@@ -265,6 +267,7 @@ function Dashboard({ profile }) {
         }
     }, [isPdfMode]);
 
+    // Основна функція для завантаження даних дашборду з урахуванням фільтрів
     const fetchDashboardData = async () => {
         setLoading(true);
         
@@ -398,6 +401,7 @@ function Dashboard({ profile }) {
         }
     };
 
+    // Функція для експорту дашборду в PDF
     const handleExportPDF = async (e) => {
         e.stopPropagation();
         setIsExporting(true); 
@@ -451,6 +455,7 @@ function Dashboard({ profile }) {
         }, 100);
     };
 
+    // Підготовка даних для графіків з урахуванням вибраного діапазону часу та фільтрів
     const aggregatedData = useMemo(() => {
         const labels = [];
         const dataMap = { logs: [], missions: [], distance: [], errors: [], time: [] };

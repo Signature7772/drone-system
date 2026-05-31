@@ -1,3 +1,4 @@
+// Головний вхідний вузол клієнтської частини
 import { useState, useEffect } from 'react';
 import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
 import { supabase } from './supabaseClient'; 
@@ -11,17 +12,21 @@ import Team from './pages/Team';
 import Dashboard from './pages/Dashboard';
 
 function App() {
+  // Змінні стану
   const [session, setSession] = useState(null);
   const [profile, setProfile] = useState(null);
   const [loading, setLoading] = useState(true);
 
+  // Блок авторизації (useEffect та fetchProfile)
   useEffect(() => {
+    // 1. Перевіряємо при старті, чи є збережена сесія
     supabase.auth.getSession().then(({ data: { session } }) => {
       setSession(session);
       if (session) fetchProfile(session.user.id);
       else setLoading(false);
     });
 
+    // 2. Слухаємо зміни (наприклад, якщо користувач натиснув "Вийти")
     const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
       setSession(session);
       if (session) fetchProfile(session.user.id);
@@ -35,6 +40,7 @@ function App() {
   }, []);
 
   const fetchProfile = async (userId) => {
+    // 3. Запит до таблиці profiles
     const { data, error } = await supabase
       .from('profiles')
       .select('id, company_id, role, email') 
@@ -49,6 +55,7 @@ function App() {
     setLoading(false);
   };
 
+  // Блок захисту маршрутів
   if (loading) {
     return <div style={{ height: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#64748b' }}>Loading workspace...</div>;
   }
@@ -57,11 +64,11 @@ function App() {
     return <Auth session={session} />;
   }
 
+  // Блок Маршрутизації
   return (
     <Router>
       <Routes>
         <Route path="/" element={<Layout />}>
-          {/* ВИПРАВЛЕНО: Додано profile={profile} */}
           <Route index element={<Dashboard profile={profile} />} />
           <Route path="missions" element={<Missions profile={profile} />} />
           <Route path="logbook" element={<Logbook profile={profile} />} />

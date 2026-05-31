@@ -1,3 +1,4 @@
+// Модуль управління командою
 import { useState, useEffect } from 'react';
 import { supabase } from '../supabaseClient';
 import { Users, Trash2, UserMinus, ShieldAlert, KeyRound, RefreshCw } from 'lucide-react';
@@ -8,6 +9,7 @@ function Team({ profile }) {
     const [companyInfo, setCompanyInfo] = useState(null);
 
     useEffect(() => {
+        // Якщо користувач належить до компанії, завантажуємо дані команди та інформацію про компанію
         if (profile?.company_id) {
             fetchTeam();
             fetchCompanyDetails();
@@ -16,7 +18,9 @@ function Team({ profile }) {
         }
     }, [profile]);
 
+    // Завантаження даних (Функції fetchTeam та fetchCompanyDetails)
     const fetchTeam = async () => {
+        // Запит для отримання всіх членів команди, які належать до тієї ж компанії
         const { data, error } = await supabase
             .from('profiles')
             .select('*')
@@ -28,6 +32,7 @@ function Team({ profile }) {
     };
 
     const fetchCompanyDetails = async () => {
+        // Запит для отримання назви компанії та коду запрошення
         const { data } = await supabase
             .from('companies')
             .select('name, join_code')
@@ -46,6 +51,7 @@ function Team({ profile }) {
         else fetchCompanyDetails(); // Оновлюємо UI
     };
 
+    // Видалення співробітників адміном
     const handleAdminDeleteUser = async (targetId, email) => {
         if (!window.confirm(`Are you sure you want to PERMANENTLY delete user ${email}?`)) return;
         const { error } = await supabase.rpc('admin_delete_user', { target_user_id: targetId });
@@ -56,6 +62,7 @@ function Team({ profile }) {
         }
     };
 
+    // Видалення власного акаунту
     const handleDeleteOwnAccount = async () => {
         if (!window.confirm('WARNING: This will permanently delete your account and all your data. Are you sure?')) return;
         const { error } = await supabase.rpc('delete_own_account');
@@ -70,6 +77,7 @@ function Team({ profile }) {
     if (isLoading) return <div>Loading team data...</div>;
     if (!profile) return null;
 
+    // Інтерфейс та Рольовий доступ
     return (
         <div style={{ padding: '20px', maxWidth: '800px', margin: '0 auto' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>

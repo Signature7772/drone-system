@@ -1,9 +1,10 @@
+// Модуль управління парком дронів
 import { useState, useEffect } from 'react';
 import { supabase } from '../supabaseClient';
-// ВИПРАВЛЕНО: Додано імпорт Clock
 import { Plus, Trash2, Edit2, ShieldAlert, Cpu, Gauge, Navigation, Activity, Search, ShieldCheck, X, Zap, Play, Archive, Clock } from 'lucide-react';
 import { useNavigate, useLocation } from 'react-router-dom';
 
+// Попередньо визначені шаблони дронів для швидкого заповнення
 const DRONE_TEMPLATES = [
     { id: 'custom', name: 'Custom / Manual Entry', model: '', type: 'Quadcopter', max_flight_time: '', max_speed: '', max_altitude: '', weight: '', controller_type: 'Standard RC' },
     { id: 'dji_m3e', name: 'DJI Mavic 3 Enterprise', model: 'Mavic 3E', type: 'Quadcopter', max_flight_time: 45, max_speed: 21, max_altitude: 6000, weight: 0.915, controller_type: 'DJI RC Pro Enterprise' },
@@ -46,6 +47,7 @@ function Drones({ profile }) {
         }
     }, [profile]);
 
+    // Функція для завантаження дронів та прав доступу, з урахуванням ролі користувача
     const fetchDronesAndAccess = async () => {
         setLoading(true);
         const { data: dronesData } = await supabase
@@ -56,6 +58,7 @@ function Drones({ profile }) {
         
         let availableDrones = dronesData || [];
 
+        // Якщо користувач не є адміністратором, фільтруємо дрони за правами доступу
         if (profile.role !== 'admin') {
             const { data: myAccess } = await supabase
                 .from('drone_access')
@@ -85,6 +88,7 @@ function Drones({ profile }) {
         setLoading(false);
     };
 
+    // Обробник зміни шаблону для швидкого заповнення форми
     const handleTemplateChange = (e) => {
         const template = DRONE_TEMPLATES.find(t => t.id === e.target.value);
         if (template && template.id !== 'custom') {
@@ -101,6 +105,7 @@ function Drones({ profile }) {
         }
     };
 
+    // Функція для збереження нового дрона або оновлення існуючого
     const handleSave = async (e) => {
         e.preventDefault();
         if (profile.role !== 'admin') return alert('Access Denied');
@@ -118,9 +123,11 @@ function Drones({ profile }) {
         };
 
         if (editingId) {
+            // Оновлюємо існуючого дрона
             const { error } = await supabase.from('drones').update(dronePayload).eq('id', editingId);
             if (error) alert(error.message);
         } else {
+            // Створюємо нового дрона
             const { error } = await supabase.from('drones').insert([dronePayload]);
             if (error) alert(error.message);
         }
@@ -156,6 +163,7 @@ function Drones({ profile }) {
         else fetchDronesAndAccess();
     };
 
+    // Функція для надання або позбавлення доступу користувачів до конкретного дрона
     const toggleAccess = async (droneId, userId) => {
         if (profile.role !== 'admin') return;
 
@@ -169,13 +177,13 @@ function Drones({ profile }) {
                 
             if (error) alert("Error removing access: " + error.message);
         } else {
-            // Надаємо доступ (ДОДАНО company_id)
+            // Надаємо доступ
             const { error } = await supabase
                 .from('drone_access')
                 .insert([{ 
                     drone_id: droneId, 
                     user_id: userId,
-                    company_id: profile.company_id // <--- Саме цього рядка не вистачало!
+                    company_id: profile.company_id
                 }]);
                 
             if (error) alert("Error granting access: " + error.message);

@@ -1,3 +1,4 @@
+// Модуль просторового планування місій
 import { useState, useMemo, useEffect, useCallback, useRef } from 'react';
 import { MapContainer, TileLayer, Marker, Popup, useMapEvents, Polyline, GeoJSON, useMap, LayersControl } from 'react-leaflet';
 import L from 'leaflet';
@@ -30,14 +31,14 @@ function isPointInsidePolygon(point, polygon) {
     return inside;
 }
 
-// === НАДІЙНИЙ МЕТЕОРАДАР ===
+// Інтеграція Погодних Даних (Weather API)
 function LiveRadarLayer() {
     const [radarUrl, setRadarUrl] = useState(null);
     useEffect(() => {
         fetch('https://api.rainviewer.com/public/weather-maps.json')
             .then(res => res.json())
             .then(data => {
-                // Використовуємо надійний radar array, але зі зміненою палітрою (color=2) для кращої видимості
+                // Використовуємо radar array
                 if (data && data.radar && data.radar.past && data.radar.past.length > 0) {
                     const latest = data.radar.past[data.radar.past.length - 1];
                     // color=2: Universal Black/White/Gray scale
@@ -70,64 +71,109 @@ function MapTracker({ setMapCenter }) {
     return null;
 }
 
-// === NFZ MANAGER (З ПЕРЕВІРКОЮ ЗУМУ) ===
+// Механізм Заборонених Зон (NFZ Manager)
 function NFZManager({ setDynamicNfz, setIsLoadingNfz }) {
     const map = useMap();
     const timeoutRef = useRef(null);
+    const abortControllerRef = useRef(null);
+    const lastFetchedBounds = useRef(null); // Кеш для збереження завантаженої області
 
-    const fetchZones = async () => {
-        // Запит виконується лише при зумі 8+
-        if (map.getZoom() < 8) {
+    const fetchZones = useCallback(async () => {
+        if (map.getZoom() < 11) {
             setDynamicNfz({ type: "FeatureCollection", features: [] });
+            lastFetchedBounds.current = null; // Скидаємо кеш, якщо віддалилися
             return;
         }
 
+        const currentBounds = map.getBounds();
+
+        // 1. Перевіряємо, чи поточний екран знаходиться всередині вже завантаженої області
+        if (lastFetchedBounds.current && lastFetchedBounds.current.contains(currentBounds)) {
+            return; // Нічого не робимо, зони для цієї території вже завантажені
+        }
+
+        // 2. Якщо вийшли за межі — завантажуємо нову область, але беремо її "з запасом" (+15% у всі сторони)
+        const paddedBounds = currentBounds.pad(0.15); 
+
         setIsLoadingNfz(true);
-        const bounds = map.getBounds();
-        const bbox = `${bounds.getSouth()},${bounds.getWest()},${bounds.getNorth()},${bounds.getEast()}`;
-        
+        const bbox = `${paddedBounds.getSouth()},${paddedBounds.getWest()},${paddedBounds.getNorth()},${paddedBounds.getEast()}`;
+
         const query = `
-            [out:json][timeout:15];
+            [out:json][timeout:10];
             (
               way["aeroway"~"aerodrome|heliport"](${bbox});
               way["military"](${bbox});
               way["power"~"plant"](${bbox});
-              way["amenity"~"hospital|prison"](${bbox});
+              way["amenity"~"prison|hospital"](${bbox});
             );
             out geom;
         `;
 
+        if (abortControllerRef.current) {
+            abortControllerRef.current.abort();
+        }
+        abortControllerRef.current = new AbortController();
+
         try {
-            const response = await fetch('https://overpass-api.de/api/interpreter', { method: 'POST', body: query });
+            const response = await fetch('https://overpass-api.de/api/interpreter', { 
+                method: 'POST', 
+                body: query,
+                signal: abortControllerRef.current.signal 
+            });
+            
+            if (!response.ok) throw new Error(`Overpass API error: ${response.status}`);
+            
             const data = await response.json();
             
             const features = data.elements.map(el => {
                 if (el.type === 'way' && el.geometry && el.geometry.length > 2) {
                     const coords = el.geometry.map(g => [g.lon, g.lat]);
-                    if (coords[0][0] !== coords[coords.length - 1][0] || coords[0][1] !== coords[coords.length - 1][1]) { coords.push(coords[0]); }
+                    if (coords[0][0] !== coords[coords.length - 1][0] || coords[0][1] !== coords[coords.length - 1][1]) { 
+                        coords.push(coords[0]); 
+                    }
                     
                     let rawType = el.tags?.name || el.tags?.military || el.tags?.aeroway || el.tags?.amenity || el.tags?.power;
                     if (!rawType || rawType === "yes") return null;
 
                     let typeName = rawType.charAt(0).toUpperCase() + rawType.slice(1);
-                    return { type: "Feature", properties: { name: `NFZ: ${typeName}`, color: "#ef4444" }, geometry: { type: "Polygon", coordinates: [coords] } };
+                    return { 
+                        type: "Feature", 
+                        properties: { name: `NFZ: ${typeName}`, color: "#ef4444" }, 
+                        geometry: { type: "Polygon", coordinates: [coords] } 
+                    };
                 }
                 return null;
             }).filter(Boolean); 
 
             setDynamicNfz({ type: "FeatureCollection", features });
-        } catch (error) { console.error("Failed to fetch NFZ from OpenStreetMap:", error); }
-        setIsLoadingNfz(false);
-    }
+            
+            // 3. Зберігаємо збільшену область у кеш
+            lastFetchedBounds.current = paddedBounds; 
 
-    useEffect(() => { fetchZones(); }, []);
+        } catch (error) { 
+            if (error.name !== 'AbortError') {
+                console.error("Failed to fetch NFZ from OpenStreetMap:", error); 
+            }
+        } finally {
+            setIsLoadingNfz(false);
+        }
+    }, [map, setDynamicNfz, setIsLoadingNfz]);
+
+    useEffect(() => {
+        // Чекаємо 500мс, щоб карта гарантовано відрендерилась і отримала правильні координати меж
+        const initTimeout = setTimeout(() => {
+            fetchZones();
+        }, 500);
+        return () => clearTimeout(initTimeout);
+    }, [fetchZones]);
 
     useMapEvents({
         moveend: () => {
             clearTimeout(timeoutRef.current);
-            timeoutRef.current = setTimeout(fetchZones, 1500);
+            timeoutRef.current = setTimeout(fetchZones, 600); // Оптимальна затримка
         }
     });
+    
     return null;
 }
 
@@ -166,7 +212,7 @@ function Missions({ profile }) {
         setMissionName('New_Mission_Plan');
     };
 
-    // === ПЕРЕВІРКА ПОГОДИ ===
+    // ПЕРЕВІРКА ПОГОДИ
     useEffect(() => {
         const checkWeather = async () => {
             const lat = waypoints.length > 0 ? waypoints[0].lat : mapCenter[0];
@@ -311,8 +357,10 @@ function Missions({ profile }) {
         return `${m > 0 ? m + 'm ' : ''}${s}s`;
     };
 
+    // ВИРІШЕННЯ ПРОБЛЕМ ПЕРЕТИНУ ЗАБОРОНЕНИХ ЗОН
     const hasViolation = useMemo(() => {
         if (waypoints.length === 0 || !dynamicNfz.features) return false;
+        // Перевіряємо кожну заборонену зону на перетин з маршрутом
         for (let feature of dynamicNfz.features) {
             const polygonCoords = feature.geometry.coordinates[0]; 
             for (let wp of waypoints) { if (isPointInsidePolygon([wp.lng, wp.lat], polygonCoords)) return true; }
@@ -345,6 +393,7 @@ function Missions({ profile }) {
     const removeWaypoint = (id) => { updateWaypointsWithHistory(waypoints.filter(wp => wp.id !== id)); if (editingPoint?.id === id) setEditingPoint(null); };
     const makeCircular = () => { if (waypoints.length < 2) return; const firstPoint = { ...waypoints[0], id: Date.now(), isNew: false }; updateWaypointsWithHistory([...waypoints, firstPoint]); };
 
+    // Генерація польотного файлу (Експорт)
     const saveMissionFile = () => {
         let fileContent = "QGC WPL 110\n";
         fileContent += `0\t1\t0\t16\t0\t0\t0\t0\t${waypoints[0].lat.toFixed(6)}\t${waypoints[0].lng.toFixed(6)}\t0.000000\t1\n`;
@@ -400,7 +449,7 @@ function Missions({ profile }) {
                     </div>
                 </div>
 
-                {/* === ЗОНА АЛЕРТІВ === */}
+                {/* ЗОНА АЛЕРТІВ */}
                 {hasViolation && (
                     <div style={{ background: '#fef2f2', border: '1px solid #ef4444', color: '#b91c1c', padding: '10px', borderRadius: '8px', marginBottom: '10px', display: 'flex', alignItems: 'center', gap: '10px', fontWeight: '600' }}>
                         <AlertTriangle size={20} /> Route Violation: The flight path intersects a Restricted Zone. Please adjust the route.
@@ -461,7 +510,7 @@ function Missions({ profile }) {
                                 <TileLayer url="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}" maxZoom={22} />
                             </LayersControl.BaseLayer>
                             
-                            {/* === ОСЬ КНОПКА ВКЛЮЧЕННЯ РАДАРУ === */}
+                            {/* КНОПКА ВКЛЮЧЕННЯ РАДАРУ */}
                             <LayersControl.Overlay name="Live Cloud Cover">
                                 <LiveRadarLayer />
                             </LayersControl.Overlay>

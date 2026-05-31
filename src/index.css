@@ -3,8 +3,8 @@
 body {
   margin: 0;
   font-family: 'Inter', sans-serif;
-  background-color: #f1f5f9; /* Світло-сірий фон */
-  color: #0f172a; /* Темно-синій текст */
+  background-color: #f1f5f9;
+  color: #0f172a;
   -webkit-font-smoothing: antialiased;
 }
 

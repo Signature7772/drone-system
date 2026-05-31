@@ -1,3 +1,4 @@
+// Структурний каркас додатку з бічною панеллю та основним контентом
 import { useState } from 'react';
 import { Outlet, Link, useLocation } from 'react-router-dom';
 import { LayoutDashboard, Map, FileText, Target, Activity, LogOut, Users, ChevronLeft, Menu } from 'lucide-react';
@@ -5,13 +6,16 @@ import { supabase } from '../supabaseClient';
 
 const Layout = () => {
     const location = useLocation();
-    const [isCollapsed, setIsCollapsed] = useState(false); // Додано стан для меню
+    // Стан для керування згорнутим/розгорнутим станом бічної панелі
+    const [isCollapsed, setIsCollapsed] = useState(false);
 
+    // Функція для обробки виходу користувача
     const handleLogout = async () => {
         await supabase.auth.signOut();
         window.location.reload();
     };
 
+    // Функція для визначення стилю посилання
     const getLinkStyle = (path) => ({
         color: location.pathname === path ? '#fff' : '#94a3b8',
         backgroundColor: location.pathname === path ? '#3b82f6' : 'transparent',
@@ -27,6 +31,7 @@ const Layout = () => {
         justifyContent: isCollapsed ? 'center' : 'flex-start' // Центруємо іконки при згортанні
     });
 
+    // Основний рендер компонента з бічною панеллю та контентом
     return (
         <div style={{ display: 'flex', minHeight: '100vh', overflow: 'hidden' }}>
             {/* Sidebar */}

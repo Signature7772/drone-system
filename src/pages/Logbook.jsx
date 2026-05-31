@@ -1,3 +1,4 @@
+// Модуль журналу польотів та експертної аналітики
 import { useState, useEffect, useRef, useMemo } from 'react';
 import { supabase } from '../supabaseClient';
 import Papa from 'papaparse';
@@ -15,8 +16,6 @@ import {
 import { useLocation, useNavigate } from 'react-router-dom';
 import jsPDF from 'jspdf';
 import html2canvas from 'html2canvas';
-
-// === ІМПОРТИ ДЛЯ 3D ===
 import { Canvas } from '@react-three/fiber';
 import { OrbitControls, Line as ThreeLine, Grid, Sphere, Html, Bounds } from '@react-three/drei';
 
@@ -49,6 +48,7 @@ const getDynamicAdvice = (type, drone, weather) => {
     }
 };
 
+// Визначення синонімів для ключових метрик
 const ALIASES = {
     time: ['time', 'Time(seconds)', 'time(millisecond)', 'TimeMs', 'Time', 'datetime(utc)'],
     lat: ['lat', 'Latitude', 'latitude', 'OSD.latitude', 'latitude(degrees)', 'GPS.Lat'],
@@ -68,17 +68,15 @@ const ALIASES = {
     current: ['current', 'current(a)', 'Amperage', 'Current', 'OSD.current']
 };
 
+// Визначення метрик для відображення
 const METRICS = [
     { key: 'alt', label: 'Altitude', unit: 'm', color: '#3b82f6', icon: <Navigation size={16}/> },
     { key: 'speed', label: 'Speed', unit: 'm/s', color: '#f59e0b', icon: <Activity size={16}/> },
-    // ДОДАНО: Графік для вертикальної швидкості
     { key: 'zSpeed', label: 'Vertical Speed', unit: 'm/s', color: '#0ea5e9', icon: <Activity size={16}/> },
-    // ДОДАНО: Графік для відсотка батареї
     { key: 'batteryPercent', label: 'Battery Level', unit: '%', color: '#10b981', icon: <Battery size={16}/> },
     { key: 'battery', label: 'Battery Voltage', unit: 'V', color: '#ef4444', icon: <AlertOctagon size={16}/> },
     { key: 'satellites', label: 'Satellites', unit: 'sats', color: '#8b5cf6', icon: <Target size={16}/> },
     { key: 'windSpeed', label: 'In-flight Wind', unit: 'm/s', color: '#64748b', icon: <Wind size={16}/> },
-    // ДОДАНО: Графік для газу
     { key: 'throttle', label: 'RC Throttle', unit: '%', color: '#8b5cf6', icon: <Activity size={16}/> },
     { key: 'pitch', label: 'Pitch', unit: '°', color: '#10b981', icon: <Navigation size={16}/> },
     { key: 'roll', label: 'Roll', unit: '°', color: '#14b8a6', icon: <Navigation size={16}/> },
@@ -96,6 +94,7 @@ function MapController({ bounds, isPdfMode }) {
     return null;
 }
 
+// Компонент для 3D візуалізації польоту
 const Flight3DView = ({ telemetryData, hoveredPoint, setHoveredPoint, pointErrorTimes }) => {
     
     const { points, minAlt } = useMemo(() => {
@@ -189,7 +188,7 @@ const Flight3DView = ({ telemetryData, hoveredPoint, setHoveredPoint, pointError
                 <Sphere args={[4, 16, 16]} position={hoveredPos}>
                     <meshStandardMaterial color="#eab308" emissive="#eab308" emissiveIntensity={0.5} />
                     <Html distanceFactor={100} center>
-                        {/* Оновлений 3D Tooltip з новими даними */}
+                        {/* 3D Tooltip з новими даними */}
                         <div style={{ background: 'rgba(0,0,0,0.85)', color: '#fff', padding: '6px 10px', borderRadius: '8px', fontSize: '12px', border: '1px solid #eab308', whiteSpace: 'nowrap', pointerEvents: 'none', transform: 'translateY(-40px)' }}>
                             <strong>Alt:</strong> {hoveredPoint.alt?.toFixed(1)}m<br/>
                             <strong>Spd:</strong> {hoveredPoint.speed?.toFixed(1)}m/s<br/>
@@ -204,6 +203,7 @@ const Flight3DView = ({ telemetryData, hoveredPoint, setHoveredPoint, pointError
     );
 };
 
+// Компонент для відображення окремої метрики з інтерактивним графіком
 const MetricChart = ({ metric, data, hoveredPoint, setHoveredPoint, isPdfMode }) => {
     const [isExpanded, setIsExpanded] = useState(true);
     const chartRef = useRef(null);
@@ -379,6 +379,7 @@ function Logbook({ profile }) {
         return null;
     };
 
+    // Функція для отримання історичних погодних даних з Open-Meteo API
     const fetchHistoricalWeather = async (lat, lng, dateString) => {
         try {
             const targetDate = new Date(dateString || Date.now());
@@ -396,6 +397,7 @@ function Logbook({ profile }) {
         } catch (e) { console.error("Historical weather fetch failed", e); }
     };
 
+    // Основна функція обробки завантаження файлу та нормалізації даних
     const handleFileUpload = (event) => {
         const file = event.target.files[0]; if (!file) return;
         Papa.parse(file, {
@@ -407,6 +409,7 @@ function Logbook({ profile }) {
                     const dateKey = Object.keys(firstRow).find(k => k.toLowerCase().includes('datetime') || k.toLowerCase().includes('utc') || k.toLowerCase() === 'date');
                     if (dateKey && firstRow[dateKey]) { const parsedDate = new Date(firstRow[dateKey]); if (!isNaN(parsedDate.getTime())) realFlightDate = parsedDate; }
                 }
+                // Нормалізація даних з урахуванням синонімів та конверсій одиниць
                 const normalizedData = results.data.map((row, index) => {
                     const latKey = ALIASES.lat.find(k => row[k] !== undefined && row[k] !== null && row[k] !== '');
                     const lngKey = ALIASES.lng.find(k => row[k] !== undefined && row[k] !== null && row[k] !== '');
@@ -503,6 +506,7 @@ function Logbook({ profile }) {
         }, 100);
     };
 
+    // Функція для виявлення аномалій у даних телеметрії
     const runAnomalyDetector = (factData, planData, droneData) => {
         let detectedAnomalies = []; let cTimes = new Set(); let pTimes = new Set(); let types = new Set();
         let missionStartIndex = 0; let missionEndIndex = factData.length - 1;
@@ -520,6 +524,7 @@ function Logbook({ profile }) {
 
         factData.forEach((point, index) => {
             let isPointError = false; const speedLimit = droneData?.max_speed || 18;
+            // Перевірка на різкі падіння батареї, слабкий GPS сигнал, перевищення швидкості, різкі зміни висоти та високий рівень дроселя
             if (point.battery !== null && point.battery < 10.5) { detectedAnomalies.push({ time: point.time, text: `Time ${point.time}s: CRITICAL BATTERY DROP (${point.battery.toFixed(1)}V)`, type: 'battery' }); types.add('battery'); isPointError = true; }
             if (point.satellites !== null && point.satellites < 8) { detectedAnomalies.push({ time: point.time, text: `Time ${point.time}s: Weak GPS Signal (${point.satellites} sats)`, type: 'gps' }); types.add('gps'); isPointError = true; }
             if (point.speed !== null && point.speed > speedLimit) { detectedAnomalies.push({ time: point.time, text: `Time ${point.time}s: Overspeeding (${point.speed.toFixed(1)} m/s, Limit: ${speedLimit})`, type: 'speed' }); types.add('speed'); isPointError = true; } 
@@ -527,10 +532,10 @@ function Logbook({ profile }) {
             if (point.zSpeed !== null && point.zSpeed < -4.0) { detectedAnomalies.push({ time: point.time, text: `Time ${point.time}s: Rapid Descent (${point.zSpeed.toFixed(1)} m/s). Risk of VRS!`, type: 'zspeed' }); types.add('zspeed'); isPointError = true; } 
             
             if (point.throttle !== null && point.throttle >= 95) { detectedAnomalies.push({ time: point.time, text: `Time ${point.time}s: High Motor Load (Throttle ${point.throttle}%). Possible high wind or overload.`, type: 'throttle' }); types.add('throttle'); isPointError = true; }
-
+            // Додаткові перевірки на основі плану польоту та характеристик дрона
             if (droneData && droneData.max_flight_time) { const maxTimeSeconds = droneData.max_flight_time * 60; if (point.time > maxTimeSeconds) { detectedAnomalies.push({ time: point.time, text: `Time ${point.time}s: Exceeded max flight time of ${droneData.max_flight_time}m`, type: 'time' }); types.add('time'); isPointError = true; } }
             if (isPointError) pTimes.add(point.time);
-            
+            // Перевірка на відхилення від плану польоту (курсові помилки)
             if (planData && planData.length >= 2) {
                 if (index >= missionStartIndex && index <= missionEndIndex) {
                     let minDistance = Infinity;
@@ -684,8 +689,8 @@ function Logbook({ profile }) {
                                         <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', fontSize: '13px', color: '#475569' }}>
                                             <div style={{ display: 'flex', justifyContent: 'space-between' }}><span><Thermometer size={14} style={{ display: 'inline', verticalAlign: 'middle', marginRight: '4px' }}/> Temp:</span> <strong>{flightWeather.temp}°C</strong></div>
                                             <div style={{ display: 'flex', justifyContent: 'space-between' }}><span><Wind size={14} style={{ display: 'inline', verticalAlign: 'middle', marginRight: '4px' }}/> Wind:</span> <strong>{flightWeather.wind} m/s</strong></div>
-                                            <div style={{ display: 'flex', justifyContent: 'space-between' }}><span><Wind size={14} style={{ display: 'inline', verticalAlign: 'middle', marginRight: '4px', color: '#ef4444' }}/> Gusts:</span> <strong style={{ color: '#ef4444' }}>{currentWeather.wind_gusts_10m} m/s</strong></div>
-                                            <div style={{ display: 'flex', justifyContent: 'space-between' }}><span><CloudRain size={14} style={{ display: 'inline', verticalAlign: 'middle', marginRight: '4px', color: '#3b82f6' }}/> Rain:</span> <strong>{flightWeather.precipitation} mm</strong></div>
+                                            <div style={{ display: 'flex', justifyContent: 'space-between' }}><span><Wind size={14} style={{ display: 'inline', verticalAlign: 'middle', marginRight: '4px', color: '#ef4444' }}/> Gusts:</span> <strong style={{ color: '#ef4444' }}>{flightWeather.gusts} m/s</strong></div>
+                                            <div style={{ display: 'flex', justifyContent: 'space-between' }}><span><CloudRain size={14} style={{ display: 'inline', verticalAlign: 'middle', marginRight: '4px', color: '#3b82f6' }}/> Rain:</span> <strong>{flightWeather.rain} mm</strong></div>
                                         </div>
                                     </div>
                                 )}
@@ -756,7 +761,7 @@ function Logbook({ profile }) {
                             </div>
                         )}
 
-                        {/* === ОНОВЛЕНИЙ LIVE TRACKER === */}
+                        {/* LIVE TRACKER */}
                         <div style={{ display: 'flex', justifyContent: 'space-between', background: hoveredPoint ? '#fefce8' : '#f8fafc', padding: '12px', borderRadius: '10px', border: '1px solid #e2e8f0', transition: 'all 0.2s' }}>
                             <div style={{ fontSize: '13px', color: '#475569', fontWeight: 'bold', flexShrink: 0 }}>
                                 <Crosshair size={14} style={{ marginBottom: '-2px', marginRight: '4px' }}/> 
