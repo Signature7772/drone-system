@@ -10,6 +10,14 @@ SUPABASE_URL = "https://pznbhnoszzpkoowziibh.supabase.co"
 SUPABASE_KEY = "sb_publishable_Pb5LcwUwkjJlNSDanCyVWw_gKLazFwN"
 BROADCAST_ENDPOINT = f"{SUPABASE_URL}/realtime/v1/api/broadcast"
 
+DRONE_ID = "Drone-01" 
+
+HEADERS = {
+    "apikey": SUPABASE_KEY,
+    "Authorization": f"Bearer {SUPABASE_KEY}",
+    "Content-Type": "application/json"
+}
+
 HEADERS = {
     "apikey": SUPABASE_KEY,
     "Authorization": f"Bearer {SUPABASE_KEY}",
@@ -169,6 +177,7 @@ while True:
                         "topic": "drone_live_telemetry",
                         "event": "live_data",
                         "payload": {
+                            "drone_id": DRONE_ID, # ДОДАНО: Ідентифікатор борту
                             "time": current_time,
                             "lat": lat,
                             "lng": lng,
@@ -185,7 +194,7 @@ while True:
                 requests.post(BROADCAST_ENDPOINT, headers=HEADERS, json=payload_data, timeout=1)
                 last_telem_send = time.time()
             except Exception:
-                pass 
+                pass
         
     elif msg_type == 'MISSION_CURRENT':
         current_wp = msg.seq

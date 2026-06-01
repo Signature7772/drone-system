@@ -17,26 +17,42 @@ import html2canvas from 'html2canvas';
 
 ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, Title, Tooltip, Legend, zoomPlugin);
 
-// Віджет реального часу для телеметрії дрона
+// Віджет реального часу для телеметрії флоту
 const LiveTrackerWidget = () => {
-    const [liveData, setLiveData] = useState(null);
-    const [isOnline, setIsOnline] = useState(false);
+    // Зберігаємо дані всіх активних дронів у вигляді об'єкта { [drone_id]: { data, lastSeen } }
+    const [fleetData, setFleetData] = useState({});
 
-    // Підписуємося на канал Supabase для отримання телеметрії в реальному часі
     useEffect(() => {
         const channel = supabase.channel('drone_live_telemetry');
 
         channel
             .on('broadcast', { event: 'live_data' }, (message) => {
-                setLiveData(message.payload);
-                setIsOnline(true);
+                const data = message.payload;
+                // Якщо скрипт не передав drone_id, присвоюємо йому дефолтне ім'я
+                const id = data.drone_id || 'Unknown-Drone'; 
+                
+                setFleetData(prev => ({
+                    ...prev,
+                    [id]: { data: data, lastSeen: Date.now() }
+                }));
             })
             .subscribe();
 
-        // Таймер для перевірки статусу (якщо 3 секунди немає даних - офлайн)
+        // Таймер перевіряє всі дрони кожну секунду. Якщо даних немає > 3 сек, видаляємо дрон
         const timer = setInterval(() => {
-            setIsOnline(false);
-        }, 3000);
+            const now = Date.now();
+            setFleetData(prev => {
+                const nextData = { ...prev };
+                let changed = false;
+                Object.keys(nextData).forEach(id => {
+                    if (now - nextData[id].lastSeen > 3000) {
+                        delete nextData[id];
+                        changed = true;
+                    }
+                });
+                return changed ? nextData : prev;
+            });
+        }, 1000);
 
         return () => {
             supabase.removeChannel(channel);
@@ -44,38 +60,50 @@ const LiveTrackerWidget = () => {
         };
     }, []);
 
-    // Рендеримо віджет з даними або повідомленням про відсутність з'єднання
+    const activeDronesCount = Object.keys(fleetData).length;
+    const isOnline = activeDronesCount > 0;
+
     return (
         <div className="pdf-block" style={{ background: isOnline ? '#ecfdf5' : '#f8fafc', padding: '20px', borderRadius: '16px', border: isOnline ? '2px solid #34d399' : '1px solid #e2e8f0', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)', marginBottom: '20px', transition: 'all 0.3s' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '15px' }}>
                 <h3 style={{ margin: 0, display: 'flex', alignItems: 'center', gap: '8px', fontSize: '16px', color: isOnline ? '#059669' : '#64748b' }}>
                     <Wifi size={18} className={isOnline ? "animate-pulse" : ""} /> 
-                    Live IoT Telemetry {isOnline ? "(ONLINE)" : "(WAITING FOR CONNECTION...)"}
+                    Live Fleet Telemetry {isOnline ? `(${activeDronesCount} ONLINE)` : "(WAITING FOR CONNECTION...)"}
                 </h3>
             </div>
 
-            {isOnline && liveData ? (
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: '15px' }}>
-                    <div style={{ background: 'white', padding: '12px', borderRadius: '10px', boxShadow: '0 1px 3px rgba(0,0,0,0.05)' }}>
-                        <div style={{ fontSize: '11px', color: '#64748b', fontWeight: 'bold', textTransform: 'uppercase', display: 'flex', alignItems: 'center', gap: '4px' }}><Battery size={14} color="#ef4444"/> Battery</div>
-                        <div style={{ fontSize: '20px', fontWeight: 'bold', color: '#0f172a' }}>{liveData.battery.toFixed(1)} V</div>
-                    </div>
-                    <div style={{ background: 'white', padding: '12px', borderRadius: '10px', boxShadow: '0 1px 3px rgba(0,0,0,0.05)' }}>
-                        <div style={{ fontSize: '11px', color: '#64748b', fontWeight: 'bold', textTransform: 'uppercase', display: 'flex', alignItems: 'center', gap: '4px' }}><Zap size={14} color="#f59e0b"/> Air Speed</div>
-                        <div style={{ fontSize: '20px', fontWeight: 'bold', color: '#0f172a' }}>{liveData.speed} m/s</div>
-                    </div>
-                    <div style={{ background: 'white', padding: '12px', borderRadius: '10px', boxShadow: '0 1px 3px rgba(0,0,0,0.05)' }}>
-                        <div style={{ fontSize: '11px', color: '#64748b', fontWeight: 'bold', textTransform: 'uppercase', display: 'flex', alignItems: 'center', gap: '4px' }}><Navigation size={14} color="#3b82f6"/> Altitude</div>
-                        <div style={{ fontSize: '20px', fontWeight: 'bold', color: '#0f172a' }}>{liveData.alt.toFixed(1)} m</div>
-                    </div>
-                    <div style={{ background: 'white', padding: '12px', borderRadius: '10px', boxShadow: '0 1px 3px rgba(0,0,0,0.05)' }}>
-                        <div style={{ fontSize: '11px', color: '#64748b', fontWeight: 'bold', textTransform: 'uppercase', display: 'flex', alignItems: 'center', gap: '4px' }}><Satellite size={14} color="#8b5cf6"/> GPS Sats</div>
-                        <div style={{ fontSize: '20px', fontWeight: 'bold', color: '#0f172a' }}>{liveData.sats}</div>
-                    </div>
+            {isOnline ? (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '15px' }}>
+                    {Object.entries(fleetData).map(([id, info]) => {
+                        const d = info.data;
+                        return (
+                            <div key={id} style={{ background: 'white', padding: '15px', borderRadius: '12px', borderLeft: '4px solid #10b981', boxShadow: '0 1px 3px rgba(0,0,0,0.05)' }}>
+                                <div style={{ fontWeight: 'bold', color: '#0f172a', marginBottom: '10px', fontSize: '14px' }}>Bord: {id}</div>
+                                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(120px, 1fr))', gap: '10px' }}>
+                                    <div>
+                                        <div style={{ fontSize: '10px', color: '#64748b', fontWeight: 'bold', textTransform: 'uppercase', display: 'flex', alignItems: 'center', gap: '4px' }}><Battery size={12} color="#ef4444"/> Battery</div>
+                                        <div style={{ fontSize: '16px', fontWeight: 'bold', color: '#0f172a' }}>{d.battery.toFixed(1)} V</div>
+                                    </div>
+                                    <div>
+                                        <div style={{ fontSize: '10px', color: '#64748b', fontWeight: 'bold', textTransform: 'uppercase', display: 'flex', alignItems: 'center', gap: '4px' }}><Zap size={12} color="#f59e0b"/> Speed</div>
+                                        <div style={{ fontSize: '16px', fontWeight: 'bold', color: '#0f172a' }}>{d.speed} m/s</div>
+                                    </div>
+                                    <div>
+                                        <div style={{ fontSize: '10px', color: '#64748b', fontWeight: 'bold', textTransform: 'uppercase', display: 'flex', alignItems: 'center', gap: '4px' }}><Navigation size={12} color="#3b82f6"/> Alt</div>
+                                        <div style={{ fontSize: '16px', fontWeight: 'bold', color: '#0f172a' }}>{d.alt.toFixed(1)} m</div>
+                                    </div>
+                                    <div>
+                                        <div style={{ fontSize: '10px', color: '#64748b', fontWeight: 'bold', textTransform: 'uppercase', display: 'flex', alignItems: 'center', gap: '4px' }}><Satellite size={12} color="#8b5cf6"/> Sats</div>
+                                        <div style={{ fontSize: '16px', fontWeight: 'bold', color: '#0f172a' }}>{d.sats}</div>
+                                    </div>
+                                </div>
+                            </div>
+                        );
+                    })}
                 </div>
             ) : (
                 <div style={{ fontSize: '14px', color: '#94a3b8' }}>
-                    Start the edge processor (fly.py) on your drone to begin live broadcasting to the dashboard.
+                    Start the edge processor (fly.py) on your drones to begin live broadcasting.
                 </div>
             )}
             <style>{`
