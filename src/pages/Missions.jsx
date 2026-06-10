@@ -115,7 +115,7 @@ function NFZManager({ setDynamicNfz, setIsLoadingNfz }) {
         abortControllerRef.current = new AbortController();
 
         try {
-            const response = await fetch('/api/overpass?data=' + encodeURIComponent(query), { 
+            const response = await fetch('https://overpass-api.de/api/interpreter?data=' + encodeURIComponent(query), { 
                 method: 'GET',
                 signal: abortControllerRef.current.signal 
             });
